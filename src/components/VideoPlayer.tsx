@@ -36,7 +36,6 @@ function detectStreamType(url: string): "hls" | "mpegts" | "native" {
     lower.includes(".webm")
   )
     return "native";
-  // Default: try HLS in browser (more compatible), mpegts in Electron
   return isElectron ? "mpegts" : "hls";
 }
 
@@ -48,6 +47,8 @@ function formatTime(seconds: number): string {
   if (h > 0) return `${h}:${String(m).padStart(2, "0")}:${String(s).padStart(2, "0")}`;
   return `${m}:${String(s).padStart(2, "0")}`;
 }
+
+const MAX_CONSECUTIVE_ERRORS = 5;
 
 export default function VideoPlayer({
   url,
@@ -62,6 +63,7 @@ export default function VideoPlayer({
   const hlsRef = useRef<Hls | null>(null);
   const mpegtsRef = useRef<mpegts.Player | null>(null);
   const hideTimer = useRef<ReturnType<typeof setTimeout>>();
+  const errorCountRef = useRef(0);
 
   const [playing, setPlaying] = useState(false);
   const [muted, setMuted] = useState(false);
@@ -97,6 +99,7 @@ export default function VideoPlayer({
     setError("");
     setBuffering(true);
     setPlaying(false);
+    errorCountRef.current = 0;
     video.removeAttribute("src");
     video.load();
 
@@ -111,24 +114,39 @@ export default function VideoPlayer({
             maxBufferLength: isLive ? 10 : 30,
             maxMaxBufferLength: isLive ? 20 : 60,
             xhrSetup: (xhr) => {
-              // Don't set withCredentials -- avoids CORS preflight on IPTV servers
               xhr.withCredentials = false;
             },
           });
           hls.loadSource(url);
           hls.attachMedia(video);
           hls.on(Hls.Events.MANIFEST_PARSED, () => {
+            errorCountRef.current = 0;
             video.play().catch(() => {});
           });
+          hls.on(Hls.Events.FRAG_LOADED, () => {
+            errorCountRef.current = 0;
+          });
           hls.on(Hls.Events.ERROR, (_e, data) => {
-            if (data.fatal) {
-              if (data.type === Hls.ErrorTypes.NETWORK_ERROR) {
-                setTimeout(() => hls.startLoad(), 2000);
-              } else if (data.type === Hls.ErrorTypes.MEDIA_ERROR) {
-                hls.recoverMediaError();
-              } else {
-                setError("Playback error. The stream may be unavailable.");
+            if (!data.fatal) return;
+
+            if (data.type === Hls.ErrorTypes.NETWORK_ERROR) {
+              errorCountRef.current += 1;
+              if (errorCountRef.current >= MAX_CONSECUTIVE_ERRORS) {
+                setError(
+                  "Impossibile raggiungere il server IPTV. Il flusso potrebbe essere bloccato dal provider o temporaneamente non disponibile."
+                );
+                return;
               }
+              setTimeout(() => hls.startLoad(), 2000);
+            } else if (data.type === Hls.ErrorTypes.MEDIA_ERROR) {
+              errorCountRef.current += 1;
+              if (errorCountRef.current >= MAX_CONSECUTIVE_ERRORS) {
+                setError("Errore di decodifica del flusso video.");
+                return;
+              }
+              hls.recoverMediaError();
+            } else {
+              setError("Playback error. The stream may be unavailable.");
             }
           });
           hlsRef.current = hls;
@@ -157,14 +175,19 @@ export default function VideoPlayer({
           player.load();
           player.play();
           player.on(mpegts.Events.ERROR, () => {
-            setError("Stream playback error. The stream may be offline.");
+            errorCountRef.current += 1;
+            if (errorCountRef.current >= MAX_CONSECUTIVE_ERRORS) {
+              setError("Stream playback error. The stream may be offline.");
+            }
+          });
+          player.on(mpegts.Events.LOADING_COMPLETE, () => {
+            errorCountRef.current = 0;
           });
           mpegtsRef.current = player;
         } else {
           setError("MPEG-TS playback is not supported.");
         }
       } else {
-        // Native HTML5 video (mp4, webm, etc.)
         video.src = url;
         video.play().catch(() => {});
       }
@@ -300,31 +323,24 @@ export default function VideoPlayer({
         toggleFullscreen();
       }}
     >
-      {/*
-        No crossOrigin attribute -- IPTV servers don't send CORS headers,
-        so setting crossOrigin="anonymous" would block media loading.
-      */}
       <video
         ref={videoRef}
         className="w-full h-full object-contain"
         playsInline
       />
 
-      {/* Live badge */}
       {isLive && playing && (
         <div className="absolute top-3 left-3 bg-red-600 text-white text-[10px] font-bold px-2 py-0.5 rounded tracking-wider z-10">
           LIVE
         </div>
       )}
 
-      {/* Buffering spinner */}
       {buffering && !error && (
         <div className="absolute inset-0 flex items-center justify-center bg-black/30 z-10">
           <Loader2 className="w-10 h-10 text-white animate-spin" />
         </div>
       )}
 
-      {/* Error overlay */}
       {error && (
         <div className="absolute inset-0 flex items-center justify-center bg-black/80 z-20">
           <div className="text-center px-6 max-w-sm">
@@ -334,7 +350,6 @@ export default function VideoPlayer({
         </div>
       )}
 
-      {/* Play overlay when paused */}
       {!playing && !buffering && !error && (
         <div className="absolute inset-0 flex items-center justify-center bg-black/40 z-10">
           <div
@@ -346,13 +361,11 @@ export default function VideoPlayer({
         </div>
       )}
 
-      {/* Controls bar */}
       <div
         className={`absolute bottom-0 left-0 right-0 bg-gradient-to-t from-black/90 via-black/50 to-transparent pt-12 pb-3 px-4 z-20 transition-opacity duration-300 ${
           showControls || !playing ? "opacity-100" : "opacity-0 pointer-events-none"
         }`}
       >
-        {/* Progress bar (non-live) */}
         {!isLive && duration > 0 && (
           <div className="mb-3 group/progress">
             <input
