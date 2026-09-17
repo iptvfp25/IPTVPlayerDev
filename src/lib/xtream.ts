@@ -23,6 +23,15 @@ function directServer(server: string): string {
   return s.replace(/\/+$/, "");
 }
 
+// In the browser, media (live/VOD/episode) URLs must go through the proxy
+// so an https page can safely load an http-only Xtream stream without
+// hitting mixed-content blocking. Electron disables web security instead,
+// so it can hit the origin server directly.
+function mediaUrl(directUrl: string): string {
+  if (isElectron) return directUrl;
+  return `${PROXY_URL}?target=${encodeURIComponent(directUrl)}`;
+}
+
 function decodeEpgText(text: string): string {
   if (!text) return "";
   try {
@@ -212,17 +221,20 @@ export class XtreamClient {
     // In browser mode, use m3u8 (HLS) format to avoid CORS issues with raw .ts
     // Xtream Codes servers serve HLS when the extension is .m3u8
     const ext = isElectron ? "ts" : "m3u8";
-    return `${directServer(this.server)}/live/${this.username}/${this.password}/${streamId}.${ext}`;
+    const direct = `${directServer(this.server)}/live/${this.username}/${this.password}/${streamId}.${ext}`;
+    return mediaUrl(direct);
   }
 
   getVodUrl(streamId: number, containerExtension: string): string {
     const ext = containerExtension || "mp4";
-    return `${directServer(this.server)}/movie/${this.username}/${this.password}/${streamId}.${ext}`;
+    const direct = `${directServer(this.server)}/movie/${this.username}/${this.password}/${streamId}.${ext}`;
+    return mediaUrl(direct);
   }
 
   getEpisodeUrl(episodeId: number, containerExtension: string): string {
     const ext = containerExtension || "mp4";
-    return `${directServer(this.server)}/series/${this.username}/${this.password}/${episodeId}.${ext}`;
+    const direct = `${directServer(this.server)}/series/${this.username}/${this.password}/${episodeId}.${ext}`;
+    return mediaUrl(direct);
   }
 
   static flattenEpisodes(seriesInfo: SeriesInfo): EpisodeItem[] {
