@@ -1,0 +1,405 @@
+import { useCallback, useEffect, useRef, useState } from "react";
+import { ChevronLeft, ChevronRight, Film, Clapperboard, Star, Play, Loader2, Heart, Eye, Download } from "lucide-react";
+import { XtreamClient } from "@/lib/xtream";
+import type { Category } from "@/types/xtream";
+import { isWatched, makeKey } from "@/lib/watchProgress";
+import { addDownload, triggerDownload } from "@/lib/downloads";
+
+export interface BrowseItem {
+  id: string;
+  name: string;
+  categoryId: string;
+  containerExtension?: string;
+  seriesId?: number;
+  poster?: string;
+  rating?: string;
+  plot?: string;
+  genre?: string;
+}
+
+interface CategoryRow {
+  category: Category;
+  items: BrowseItem[];
+  loading: boolean;
+}
+
+interface NetflixBrowseProps {
+  client: XtreamClient;
+  contentType: "vod" | "series";
+  onItemClick: (item: BrowseItem) => void;
+  favorites: Set<string>;
+  onToggleFavorite: (item: BrowseItem) => void;
+  accentColor?: string;
+}
+
+function handleDownloadVod(item: BrowseItem, client: XtreamClient) {
+  const ext = item.containerExtension || "mp4";
+  const url = client.getVodUrl(Number(item.id), ext);
+  const entry = addDownload({
+    id: item.id,
+    type: "vod",
+    name: item.name,
+    url,
+    poster: item.poster,
+    rating: item.rating,
+    genre: item.genre,
+  });
+  triggerDownload(entry);
+}
+
+// Module-level cache so data survives tab switches
+const browseCache: Record<string, CategoryRow[]> = {};
+
+function PosterCard({
+  item,
+  contentType,
+  onClick,
+  isFav,
+  onToggleFav,
+  accentColor = "#e91e63",
+  onDownload,
+}: {
+  item: BrowseItem;
+  contentType: "vod" | "series";
+  onClick: () => void;
+  isFav: boolean;
+  onToggleFav: () => void;
+  accentColor?: string;
+  onDownload?: () => void;
+}) {
+  const watched = isWatched(
+    contentType === "vod"
+      ? makeKey("vod", Number(item.id))
+      : makeKey("series", Number(item.seriesId || item.id))
+  );
+
+  return (
+    <div className="flex-shrink-0 w-[150px] group">
+      <button
+        onClick={onClick}
+        className="relative rounded-lg overflow-hidden transition-all duration-200 hover:scale-[1.08] hover:z-10 w-full"
+      >
+        <div className="aspect-[2/3] bg-[#1a1e2a] rounded-lg overflow-hidden relative">
+          {item.poster ? (
+            <img
+              src={item.poster}
+              alt={item.name}
+              className="w-full h-full object-cover"
+              loading="lazy"
+              onError={(e) => {
+                (e.target as HTMLImageElement).style.display = "none";
+              }}
+            />
+          ) : (
+            <div className="w-full h-full flex items-center justify-center">
+              {contentType === "vod" ? (
+                <Film className="w-8 h-8 text-gray-700" />
+              ) : (
+                <Clapperboard className="w-8 h-8 text-gray-700" />
+              )}
+            </div>
+          )}
+
+          <div className="absolute inset-0 bg-gradient-to-t from-black/90 via-black/20 to-transparent opacity-0 group-hover:opacity-100 transition-opacity flex flex-col justify-end p-2">
+            <div className="flex items-center justify-center">
+              <div className="w-9 h-9 rounded-full bg-white/90 flex items-center justify-center">
+                <Play className="w-4 h-4 text-black fill-black ml-0.5" />
+              </div>
+            </div>
+          </div>
+
+          {item.rating && Number(item.rating) > 0 && (
+            <div className="absolute top-1.5 left-1.5 bg-black/70 text-yellow-400 text-[10px] font-bold px-1.5 py-0.5 rounded flex items-center gap-0.5">
+              <Star className="w-2.5 h-2.5 fill-yellow-400 text-yellow-400" />
+              {Number(item.rating).toFixed(1)}
+            </div>
+          )}
+
+          {watched && (
+            <div className="absolute top-1.5 right-1.5 text-white rounded p-0.5" style={{ backgroundColor: `${accentColor}cc` }}>
+              <Eye className="w-3 h-3" />
+            </div>
+          )}
+        </div>
+      </button>
+
+      <div className="flex items-start gap-1 mt-1.5">
+        <p className="text-gray-400 text-xs font-medium line-clamp-2 leading-tight flex-1 group-hover:text-white transition-colors">
+          {item.name}
+        </p>
+        {onDownload && (
+          <button
+            onClick={(e) => { e.stopPropagation(); onDownload(); }}
+            className="flex-shrink-0 mt-0.5 mr-0.5"
+            title="Download"
+          >
+            <Download className="w-3.5 h-3.5 text-gray-600 hover:text-white transition-colors" />
+          </button>
+        )}
+        <button
+          onClick={(e) => { e.stopPropagation(); onToggleFav(); }}
+          className="flex-shrink-0 mt-0.5"
+          title={isFav ? "Remove from favorites" : "Add to favorites"}
+        >
+          <Heart
+            className={`w-3.5 h-3.5 transition-colors ${isFav ? "fill-current" : "text-gray-600 hover:text-current"}`}
+            style={{ color: isFav ? accentColor : undefined }}
+            onMouseEnter={(e) => { if (!isFav) (e.target as SVGElement).style.color = accentColor; }}
+            onMouseLeave={(e) => { if (!isFav) (e.target as SVGElement).style.color = ""; }}
+          />
+        </button>
+      </div>
+    </div>
+  );
+}
+
+function HorizontalRow({
+  row,
+  contentType,
+  onItemClick,
+  favorites,
+  onToggleFavorite,
+  accentColor = "#e91e63",
+  client,
+}: {
+  row: CategoryRow;
+  contentType: "vod" | "series";
+  onItemClick: (item: BrowseItem) => void;
+  favorites: Set<string>;
+  onToggleFavorite: (item: BrowseItem) => void;
+  accentColor?: string;
+  client: XtreamClient;
+}) {
+  const scrollRef = useRef<HTMLDivElement>(null);
+  const [canScrollLeft, setCanScrollLeft] = useState(false);
+  const [canScrollRight, setCanScrollRight] = useState(false);
+
+  const checkScroll = useCallback(() => {
+    const el = scrollRef.current;
+    if (!el) return;
+    setCanScrollLeft(el.scrollLeft > 10);
+    setCanScrollRight(el.scrollLeft < el.scrollWidth - el.clientWidth - 10);
+  }, []);
+
+  useEffect(() => {
+    checkScroll();
+    const el = scrollRef.current;
+    if (!el) return;
+    el.addEventListener("scroll", checkScroll);
+    return () => el.removeEventListener("scroll", checkScroll);
+  }, [checkScroll, row.items]);
+
+  const scroll = (dir: "left" | "right") => {
+    const el = scrollRef.current;
+    if (!el) return;
+    el.scrollBy({ left: dir === "left" ? -600 : 600, behavior: "smooth" });
+  };
+
+  if (row.loading) {
+    return (
+      <div className="mb-8">
+        <h3 className="text-white font-semibold text-sm mb-3 px-6">{row.category.category_name}</h3>
+        <div className="flex items-center justify-center py-6">
+          <Loader2 className="w-5 h-5 animate-spin" style={{ color: accentColor }} />
+        </div>
+      </div>
+    );
+  }
+
+  if (row.items.length === 0) return null;
+
+  const favKey = contentType === "vod" ? "vod" : "series";
+
+  return (
+    <div className="mb-8 group/row">
+      <h3 className="text-white font-semibold text-sm mb-3 px-6">{row.category.category_name}</h3>
+      <div className="relative">
+        {canScrollLeft && (
+          <button
+            onClick={() => scroll("left")}
+            className="absolute left-0 top-0 bottom-6 w-10 z-10 bg-gradient-to-r from-[#0d0f14] to-transparent flex items-center justify-center opacity-0 group-hover/row:opacity-100 transition-opacity"
+          >
+            <ChevronLeft className="w-6 h-6 text-white" />
+          </button>
+        )}
+
+        <div
+          ref={scrollRef}
+          className="flex gap-3 overflow-x-auto px-6 scrollbar-hide"
+          style={{ scrollbarWidth: "none" }}
+        >
+          {row.items.map((item) => (
+            <PosterCard
+              key={item.id}
+              item={item}
+              contentType={contentType}
+              onClick={() => onItemClick(item)}
+              isFav={favorites.has(`${favKey}:${item.id}`)}
+              onToggleFav={() => onToggleFavorite(item)}
+              accentColor={accentColor}
+              onDownload={contentType === "vod" ? () => handleDownloadVod(item, client) : undefined}
+            />
+          ))}
+        </div>
+
+        {canScrollRight && (
+          <button
+            onClick={() => scroll("right")}
+            className="absolute right-0 top-0 bottom-6 w-10 z-10 bg-gradient-to-l from-[#0d0f14] to-transparent flex items-center justify-center opacity-0 group-hover/row:opacity-100 transition-opacity"
+          >
+            <ChevronRight className="w-6 h-6 text-white" />
+          </button>
+        )}
+      </div>
+    </div>
+  );
+}
+
+export default function NetflixBrowse({
+  client,
+  contentType,
+  onItemClick,
+  favorites,
+  onToggleFavorite,
+  accentColor = "#e91e63",
+}: NetflixBrowseProps) {
+  const [rows, setRows] = useState<CategoryRow[]>(() => browseCache[contentType] || []);
+  const [loading, setLoading] = useState(!browseCache[contentType]);
+  const [error, setError] = useState("");
+
+  useEffect(() => {
+    // If we have cached data, use it
+    if (browseCache[contentType] && browseCache[contentType].length > 0) {
+      setRows(browseCache[contentType]);
+      setLoading(false);
+      return;
+    }
+
+    let cancelled = false;
+    setLoading(true);
+    setError("");
+    setRows([]);
+
+    (async () => {
+      try {
+        const cats =
+          contentType === "vod"
+            ? await client.getVodCategories()
+            : await client.getSeriesCategories();
+
+        if (cancelled) return;
+
+        // Show ALL categories
+        const allCats = cats;
+
+        setRows(allCats.map((cat) => ({ category: cat, items: [], loading: true })));
+        setLoading(false);
+
+        // Preload poster images as we fetch
+        const preloadImage = (url: string) => {
+          const img = new Image();
+          img.src = url;
+        };
+
+        // Load category items in batches of 4
+        for (let i = 0; i < allCats.length; i += 4) {
+          if (cancelled) return;
+          const batch = allCats.slice(i, i + 4);
+          const results = await Promise.allSettled(
+            batch.map(async (cat) => {
+              if (contentType === "vod") {
+                const streams = await client.getVodStreams(cat.category_id);
+                return streams.map((s): BrowseItem => {
+                  if (s.stream_icon) preloadImage(s.stream_icon);
+                  return {
+                    id: String(s.stream_id),
+                    name: s.name,
+                    categoryId: s.category_id,
+                    containerExtension: s.container_extension,
+                    poster: s.stream_icon || undefined,
+                    rating: s.rating || undefined,
+                  };
+                });
+              } else {
+                const series = await client.getSeries(cat.category_id);
+                return series.map((s): BrowseItem => {
+                  if (s.cover) preloadImage(s.cover);
+                  return {
+                    id: String(s.series_id),
+                    name: s.name,
+                    categoryId: s.category_id,
+                    seriesId: s.series_id,
+                    poster: s.cover || undefined,
+                    rating: s.rating || undefined,
+                    plot: s.plot || undefined,
+                    genre: s.genre || undefined,
+                  };
+                });
+              }
+            })
+          );
+
+          if (cancelled) return;
+
+          setRows((prev) => {
+            const next = [...prev];
+            for (let j = 0; j < batch.length; j++) {
+              const idx = i + j;
+              const result = results[j];
+              if (idx < next.length) {
+                next[idx] = {
+                  ...next[idx],
+                  items: result.status === "fulfilled" ? result.value : [],
+                  loading: false,
+                };
+              }
+            }
+            // Update cache
+            browseCache[contentType] = next;
+            return next;
+          });
+        }
+      } catch (e) {
+        if (!cancelled) {
+          setError(e instanceof Error ? e.message : String(e));
+          setLoading(false);
+        }
+      }
+    })();
+
+    return () => { cancelled = true; };
+  }, [client, contentType]);
+
+  if (loading) {
+    return (
+      <div className="flex items-center justify-center py-20">
+        <Loader2 className="w-8 h-8 animate-spin" style={{ color: accentColor }} />
+      </div>
+    );
+  }
+
+  if (error) {
+    return (
+      <div className="flex items-center justify-center py-20">
+        <p className="text-red-400 text-sm">{error}</p>
+      </div>
+    );
+  }
+
+  return (
+    <div className="py-4">
+      {rows.map((row) => (
+        <HorizontalRow
+          key={row.category.category_id}
+          row={row}
+          contentType={contentType}
+          onItemClick={onItemClick}
+          favorites={favorites}
+          onToggleFavorite={onToggleFavorite}
+          accentColor={accentColor}
+          client={client}
+        />
+      ))}
+    </div>
+  );
+}

@@ -1,0 +1,99 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+@layer base {
+  html, body, #root {
+    height: 100%;
+    margin: 0;
+    background: #0d0f14;
+  }
+
+  body {
+    font-family: 'Inter', -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
+    -webkit-font-smoothing: antialiased;
+    -moz-osx-font-smoothing: grayscale;
+  }
+}
+
+@layer utilities {
+  .sidebar-scroll::-webkit-scrollbar {
+    width: 6px;
+  }
+  .sidebar-scroll::-webkit-scrollbar-track {
+    background: transparent;
+  }
+  .sidebar-scroll::-webkit-scrollbar-thumb {
+    background: rgba(255, 255, 255, 0.1);
+    border-radius: 3px;
+  }
+  .sidebar-scroll::-webkit-scrollbar-thumb:hover {
+    background: rgba(255, 255, 255, 0.2);
+  }
+
+  .line-clamp-2 {
+    display: -webkit-box;
+    -webkit-line-clamp: 2;
+    -webkit-box-orient: vertical;
+    overflow: hidden;
+  }
+
+  .line-clamp-3 {
+    display: -webkit-box;
+    -webkit-line-clamp: 3;
+    -webkit-box-orient: vertical;
+    overflow: hidden;
+  }
+
+  .scrollbar-hide::-webkit-scrollbar {
+    display: none;
+  }
+  .scrollbar-hide {
+    -ms-overflow-style: none;
+    scrollbar-width: none;
+  }
+}
+
+@layer components {
+  /* Netflix-style volume slider */
+  .volume-slider {
+    -webkit-appearance: none;
+    appearance: none;
+    height: 4px;
+    border-radius: 2px;
+    background: rgba(255, 255, 255, 0.2);
+    outline: none;
+    cursor: pointer;
+  }
+
+  .volume-slider::-webkit-slider-thumb {
+    -webkit-appearance: none;
+    appearance: none;
+    width: 14px;
+    height: 14px;
+    border-radius: 50%;
+    background: #fff;
+    cursor: pointer;
+    transition: transform 0.15s;
+  }
+
+  .volume-slider::-webkit-slider-thumb:hover {
+    transform: scale(1.2);
+    background: #e91e63;
+  }
+
+  .volume-slider::-moz-range-thumb {
+    width: 14px;
+    height: 14px;
+    border-radius: 50%;
+    background: #fff;
+    cursor: pointer;
+    border: none;
+    transition: transform 0.15s;
+  }
+
+  .volume-slider::-moz-range-thumb:hover {
+    transform: scale(1.2);
+    background: #e91e63;
+  }
+}
