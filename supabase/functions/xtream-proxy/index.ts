@@ -14,6 +14,15 @@ function isSafeUrl(raw: string): URL | null {
   return null;
 }
 
+function getClientIp(req: Request): string | null {
+  return (
+    req.headers.get("cf-connecting-ip") ||
+    req.headers.get("x-real-ip") ||
+    req.headers.get("x-forwarded-for")?.split(",")[0].trim() ||
+    null
+  );
+}
+
 function rewritePlaylist(text: string, originalUrl: URL, proxyBase: string): string {
   const lines = text.split(/\r?\n/);
   const out = lines.map((line) => {
@@ -37,6 +46,7 @@ Deno.serve(async (req: Request) => {
 
   const reqUrl = new URL(req.url);
   const proxyBase = `${reqUrl.origin}${reqUrl.pathname}`;
+  const clientIp = getClientIp(req);
 
   if (req.method === "GET") {
     const target = reqUrl.searchParams.get("target");
@@ -61,6 +71,11 @@ Deno.serve(async (req: Request) => {
       };
       const range = req.headers.get("Range");
       if (range) forwardHeaders["Range"] = range;
+      if (clientIp) {
+        forwardHeaders["X-Forwarded-For"] = clientIp;
+        forwardHeaders["X-Real-IP"] = clientIp;
+        forwardHeaders["Forwarded"] = `for=${clientIp}`;
+      }
 
       const upstream = await fetch(parsed.toString(), {
         headers: forwardHeaders,
@@ -116,8 +131,17 @@ Deno.serve(async (req: Request) => {
       );
     }
 
+    const forwardHeaders: Record<string, string> = {
+      "User-Agent": "IPTV-Desktop/1.0",
+    };
+    if (clientIp) {
+      forwardHeaders["X-Forwarded-For"] = clientIp;
+      forwardHeaders["X-Real-IP"] = clientIp;
+      forwardHeaders["Forwarded"] = `for=${clientIp}`;
+    }
+
     const upstream = await fetch(url, {
-      headers: { "User-Agent": "IPTV-Desktop/1.0" },
+      headers: forwardHeaders,
       signal: AbortSignal.timeout(25000),
     });
 
