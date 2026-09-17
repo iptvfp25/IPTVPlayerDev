@@ -23,10 +23,10 @@ function directServer(server: string): string {
   return s.replace(/\/+$/, "");
 }
 
-// In the browser, media (live/VOD/episode) URLs must go through the proxy
-// so an https page can safely load an http-only Xtream stream without
-// hitting mixed-content blocking. Electron disables web security instead,
-// so it can hit the origin server directly.
+// In the browser, API/JSON calls (player_api.php) must go through the proxy
+// so an https page can safely reach an http-only Xtream server without
+// hitting mixed-content blocking on fetch/XHR requests. Electron disables
+// web security instead, so it can hit the origin server directly.
 function mediaUrl(directUrl: string): string {
   if (isElectron) return directUrl;
   return `${PROXY_URL}?target=${encodeURIComponent(directUrl)}`;
@@ -218,11 +218,15 @@ export class XtreamClient {
   }
 
   getLiveUrl(streamId: number): string {
-    // In browser mode, use m3u8 (HLS) format to avoid CORS issues with raw .ts
-    // Xtream Codes servers serve HLS when the extension is .m3u8
-    const ext = isElectron ? "ts" : "m3u8";
-    const direct = `${directServer(this.server)}/live/${this.username}/${this.password}/${streamId}.${ext}`;
-    return mediaUrl(direct);
+    // Live streams are loaded directly by the <video> element (via mpegts.js),
+    // bypassing the JSON proxy entirely. Browsers treat <video>/<audio> media
+    // loads as "optionally blockable" mixed content, so an http:// stream URL
+    // works fine even from an https:// page -- unlike fetch/XHR calls, which
+    // ARE blocked and which is why the proxy is still used for player_api.php.
+    // Routing the continuous live stream through the proxy caused 502 /
+    // "Unexpected end of JSON input" errors because that proxy path expects
+    // short-lived JSON responses, not a long-lived video stream.
+    return `${directServer(this.server)}/live/${this.username}/${this.password}/${streamId}.ts`;
   }
 
   getVodUrl(streamId: number, containerExtension: string): string {
