@@ -3,6 +3,7 @@ const corsHeaders = {
   "Access-Control-Allow-Methods": "GET, POST, PUT, DELETE, OPTIONS",
   "Access-Control-Allow-Headers": "Content-Type, Authorization, X-Client-Info, Apikey, Range",
   "Access-Control-Expose-Headers": "Content-Length, Content-Range, Accept-Ranges",
+  "Cross-Origin-Resource-Policy": "cross-origin",
 };
 
 function isSafeUrl(raw: string): URL | null {
@@ -37,8 +38,6 @@ Deno.serve(async (req: Request) => {
   const reqUrl = new URL(req.url);
   const proxyBase = `${reqUrl.origin}${reqUrl.pathname}`;
 
-  // --- Streaming passthrough mode (GET ?target=<url>) ---
-  // Used for live channels, VOD, and series episodes (video/HLS content).
   if (req.method === "GET") {
     const target = reqUrl.searchParams.get("target");
     if (!target) {
@@ -82,15 +81,13 @@ Deno.serve(async (req: Request) => {
       }
 
       if (isPlaylist) {
-        // Rewrite playlist so every segment/sub-playlist URI is re-proxied too.
         const text = await upstream.text();
         const rewritten = rewritePlaylist(text, parsed, proxyBase);
         respHeaders.set("Content-Type", "application/vnd.apple.mpegurl");
-        respHeaders.delete("Content-Length"); // length changed after rewrite
+        respHeaders.delete("Content-Length");
         return new Response(rewritten, { status: upstream.status, headers: respHeaders });
       }
 
-      // Binary passthrough (segments, mp4, ts, etc.) — stream body directly, no buffering.
       respHeaders.set("Content-Type", contentType || "application/octet-stream");
       return new Response(upstream.body, { status: upstream.status, headers: respHeaders });
     } catch (err) {
@@ -102,8 +99,6 @@ Deno.serve(async (req: Request) => {
     }
   }
 
-  // --- JSON API passthrough mode (POST { url }) ---
-  // Used for Xtream player_api.php calls (categories, streams, series info, EPG, etc.)
   try {
     const { url } = await req.json();
     if (!url || typeof url !== "string") {
