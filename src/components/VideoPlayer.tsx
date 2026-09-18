@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState, useCallback, useLayoutEffect } from "react";
+import { useEffect, useRef, useState, useCallback } from "react";
 import {
   Play,
   Pause,
@@ -200,20 +200,6 @@ export default function VideoPlayer({
       destroyPlayers();
     };
   }, [url, isLive, destroyPlayers]);
-
-  // Movies and series episodes should open in true fullscreen immediately,
-  // matching the expected UX. This runs in a layout effect (synchronous,
-  // right after DOM commit) rather than a regular effect, so it stays as
-  // close as possible to the original click's user-activation window --
-  // browsers require the Fullscreen API to be triggered by a real user
-  // gesture, and delaying too long (e.g. a normal async effect or a
-  // setTimeout) causes the request to be silently rejected.
-  useLayoutEffect(() => {
-    if (isLive) return;
-    if (!containerRef.current) return;
-    if (document.fullscreenElement) return;
-    containerRef.current.requestFullscreen().catch(() => {});
-  }, [url, isLive]);
 
   useEffect(() => {
     const video = videoRef.current;
