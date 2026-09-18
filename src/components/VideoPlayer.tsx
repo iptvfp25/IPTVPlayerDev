@@ -50,6 +50,17 @@ function formatTime(seconds: number): string {
 
 const MAX_CONSECUTIVE_ERRORS = 5;
 
+// Many Xtream panels serve VOD/episode files that are actually raw
+// MPEG-TS streams even though the URL ends in .mp4/.mkv (they just pass
+// through whatever container the source recording used). A native
+// <video> element can't demux MPEG-TS, so it sits there waiting for data
+// it will never understand -- that's what caused movies/episodes to take
+// a long time (or never) to start even though the network request itself
+// was fine. If native playback hasn't produced any real progress within
+// this window, we transparently fall back to the mpegts.js demuxer on the
+// exact same URL, the same way live channels already do.
+const NATIVE_STARTUP_TIMEOUT_MS = 3500;
+
 export default function VideoPlayer({
   url,
   title,
@@ -65,6 +76,8 @@ export default function VideoPlayer({
   const hideTimer = useRef<ReturnType<typeof setTimeout>>();
   const clickTimer = useRef<ReturnType<typeof setTimeout>>();
   const errorCountRef = useRef(0);
+  const nativeFallbackTimer = useRef<ReturnType<typeof setTimeout>>();
+  const nativeStartedRef = useRef(false);
 
   const [playing, setPlaying] = useState(false);
   const [muted, setMuted] = useState(false);
@@ -90,7 +103,49 @@ export default function VideoPlayer({
       } catch {}
       mpegtsRef.current = null;
     }
+    if (nativeFallbackTimer.current) {
+      clearTimeout(nativeFallbackTimer.current);
+      nativeFallbackTimer.current = undefined;
+    }
   }, []);
+
+  // Starts (or restarts) playback via the mpegts.js demuxer, used both for
+  // genuine .ts URLs and as the fallback when a "native" URL turns out to
+  // actually be MPEG-TS in disguise.
+  const startMpegts = useCallback((video: HTMLVideoElement, targetUrl: string) => {
+    if (!mpegts.isSupported()) {
+      setError("MPEG-TS playback is not supported.");
+      return;
+    }
+    video.removeAttribute("src");
+    video.load();
+    const player = mpegts.createPlayer(
+      {
+        type: "mpegts",
+        isLive,
+        url: targetUrl,
+      },
+      {
+        enableWorker: true,
+        liveBufferLatencyChasing: isLive,
+        liveBufferLatencyMaxLatency: 5,
+        liveBufferLatencyMinRemain: 1,
+      }
+    );
+    player.attachMediaElement(video);
+    player.load();
+    player.play();
+    player.on(mpegts.Events.ERROR, () => {
+      errorCountRef.current += 1;
+      if (errorCountRef.current >= MAX_CONSECUTIVE_ERRORS) {
+        setError("Stream playback error. The stream may be offline.");
+      }
+    });
+    player.on(mpegts.Events.LOADING_COMPLETE, () => {
+      errorCountRef.current = 0;
+    });
+    mpegtsRef.current = player;
+  }, [isLive]);
 
   useEffect(() => {
     const video = videoRef.current;
@@ -101,6 +156,7 @@ export default function VideoPlayer({
     setBuffering(true);
     setPlaying(false);
     errorCountRef.current = 0;
+    nativeStartedRef.current = false;
     video.removeAttribute("src");
     video.load();
 
@@ -165,39 +221,21 @@ export default function VideoPlayer({
           setError("HLS playback is not supported in this environment.");
         }
       } else if (type === "mpegts") {
-        if (mpegts.isSupported()) {
-          const player = mpegts.createPlayer(
-            {
-              type: "mpegts",
-              isLive,
-              url,
-            },
-            {
-              enableWorker: true,
-              liveBufferLatencyChasing: isLive,
-              liveBufferLatencyMaxLatency: 5,
-              liveBufferLatencyMinRemain: 1,
-            }
-          );
-          player.attachMediaElement(video);
-          player.load();
-          player.play();
-          player.on(mpegts.Events.ERROR, () => {
-            errorCountRef.current += 1;
-            if (errorCountRef.current >= MAX_CONSECUTIVE_ERRORS) {
-              setError("Stream playback error. The stream may be offline.");
-            }
-          });
-          player.on(mpegts.Events.LOADING_COMPLETE, () => {
-            errorCountRef.current = 0;
-          });
-          mpegtsRef.current = player;
-        } else {
-          setError("MPEG-TS playback is not supported.");
-        }
+        startMpegts(video, url);
       } else {
+        // "native" -- but if this turns out to actually be MPEG-TS wearing
+        // an .mp4/.mkv extension, the video element will never fire
+        // "playing" or advance currentTime. Arm a fallback timer that
+        // switches to the mpegts.js demuxer if nothing has genuinely
+        // started by the deadline.
         video.src = url;
         video.play().catch(() => {});
+
+        nativeFallbackTimer.current = setTimeout(() => {
+          if (!nativeStartedRef.current && videoRef.current) {
+            startMpegts(videoRef.current, url);
+          }
+        }, NATIVE_STARTUP_TIMEOUT_MS);
       }
     } catch (e) {
       setError(e instanceof Error ? e.message : "Failed to initialize player");
@@ -206,7 +244,7 @@ export default function VideoPlayer({
     return () => {
       destroyPlayers();
     };
-  }, [url, isLive, destroyPlayers]);
+  }, [url, isLive, destroyPlayers, startMpegts]);
 
   useEffect(() => {
     const video = videoRef.current;
@@ -227,12 +265,28 @@ export default function VideoPlayer({
     const onPlay = () => setPlaying(true);
     const onPause = () => setPlaying(false);
     const onTime = () => {
+      // Real playback progress -- cancel the MPEG-TS-in-disguise fallback
+      // timer, since native decoding is clearly working.
+      if (video.currentTime > 0) {
+        nativeStartedRef.current = true;
+        if (nativeFallbackTimer.current) {
+          clearTimeout(nativeFallbackTimer.current);
+          nativeFallbackTimer.current = undefined;
+        }
+      }
       setCurrentTime(video.currentTime);
       setDuration(video.duration || 0);
       onTimeUpdate?.(video.currentTime, video.duration || 0);
     };
     const onWaiting = () => setBuffering(true);
-    const onPlaying = () => setBuffering(false);
+    const onPlaying = () => {
+      setBuffering(false);
+      nativeStartedRef.current = true;
+      if (nativeFallbackTimer.current) {
+        clearTimeout(nativeFallbackTimer.current);
+        nativeFallbackTimer.current = undefined;
+      }
+    };
     const onCanPlay = () => setBuffering(false);
     const onError = () => {
       if (video.error) setError("Playback failed. The stream may be unavailable.");
