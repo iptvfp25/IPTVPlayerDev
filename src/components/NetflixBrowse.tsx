@@ -57,17 +57,17 @@ function notifyBrowseUpdate(contentType: "vod" | "series", rows: CategoryRow[]) 
   browseListeners[contentType].forEach((listener) => listener(rows));
 }
 
-// Fetches categories + ALL items for a content type in just two network
-// requests total, then groups items into their categories locally in JS.
+// Fetches categories fast first (small payload -> rows + spinners appear
+// almost instantly), then fetches the full catalog in ONE request (instead
+// of one request per category) and groups items into their categories
+// locally in JS once that resolves.
 //
-// This used to fetch items per-category (one request per category, batched
-// 4 at a time), which meant dozens of sequential round-trips through the
-// Supabase proxy for catalogs with many categories -- each one paying the
-// full network + proxy latency cost. That's what caused the multi-second
-// (sometimes 20s+) delay switching into Movies/Series. Fetching everything
-// in one shot and grouping in memory is essentially instant by comparison,
-// even for catalogs with thousands of items -- JSON parsing and a single
-// grouping pass over a few thousand objects takes low milliseconds.
+// The full-catalog request is the slow part on some Xtream panels -- an
+// unfiltered "get_vod_streams" / "get_series" dump is a heavier query on
+// their end than a single filtered category, so this can genuinely take a
+// few seconds server-side regardless of what we do client-side. Showing
+// categories with spinners immediately (instead of a blank screen while
+// everything loads) makes that wait feel responsive instead of frozen.
 //
 // Safe to call multiple times -- if a load is already in flight or already
 // cached, it reuses it instead of re-fetching. LoginScreen kicks this off
@@ -83,10 +83,13 @@ export function preloadBrowseData(client: XtreamClient, contentType: "vod" | "se
 
   const promise = (async () => {
     try {
-      const [cats, allItems] = await Promise.all([
-        contentType === "vod" ? client.getVodCategories() : client.getSeriesCategories(),
-        contentType === "vod" ? client.getVodStreams() : client.getSeries(),
-      ]);
+      const cats =
+        contentType === "vod" ? await client.getVodCategories() : await client.getSeriesCategories();
+      const initialRows: CategoryRow[] = cats.map((cat) => ({ category: cat, items: [], loading: true }));
+      notifyBrowseUpdate(contentType, initialRows);
+
+      const allItems =
+        contentType === "vod" ? await client.getVodStreams() : await client.getSeries();
 
       const byCategory = new Map<string, BrowseItem[]>();
       for (const raw of allItems as any[]) {
