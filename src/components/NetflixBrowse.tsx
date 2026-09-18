@@ -47,8 +47,105 @@ function handleDownloadVod(item: BrowseItem, client: XtreamClient) {
   triggerDownload(entry);
 }
 
-// Module-level cache so data survives tab switches
+// Module-level cache so data survives tab switches, plus a tiny pub-sub so
+// any mounted NetflixBrowse instance re-renders as rows fill in -- whether
+// the fetch was kicked off by this component mounting, or ahead of time by
+// preloadBrowseData() during login.
 const browseCache: Record<string, CategoryRow[]> = {};
+type BrowseListener = (rows: CategoryRow[]) => void;
+const browseListeners: Record<string, Set<BrowseListener>> = { vod: new Set(), series: new Set() };
+const browseLoadingPromises: Record<string, Promise<void> | undefined> = {};
+
+function notifyBrowseUpdate(contentType: "vod" | "series", rows: CategoryRow[]) {
+  browseCache[contentType] = rows;
+  browseListeners[contentType].forEach((listener) => listener(rows));
+}
+
+// Fetches categories + items (with poster preloading) for a content type
+// and populates the shared cache incrementally. Safe to call multiple
+// times -- if a load is already in flight or already cached, it reuses it
+// instead of re-fetching. This is what lets LoginScreen kick off Movies and
+// Series loading during the login screen, so switching to those tabs for
+// the first time doesn't show a full loading spinner.
+export function preloadBrowseData(client: XtreamClient, contentType: "vod" | "series"): Promise<void> {
+  if (browseCache[contentType] && browseCache[contentType].length > 0) {
+    return Promise.resolve();
+  }
+  if (browseLoadingPromises[contentType]) {
+    return browseLoadingPromises[contentType]!;
+  }
+
+  const promise = (async () => {
+    try {
+      const cats =
+        contentType === "vod" ? await client.getVodCategories() : await client.getSeriesCategories();
+
+      let rows: CategoryRow[] = cats.map((cat) => ({ category: cat, items: [], loading: true }));
+      notifyBrowseUpdate(contentType, rows);
+
+      const preloadImage = (url: string) => {
+        const img = new Image();
+        img.src = url;
+      };
+
+      for (let i = 0; i < cats.length; i += 4) {
+        const batch = cats.slice(i, i + 4);
+        const results = await Promise.allSettled(
+          batch.map(async (cat) => {
+            if (contentType === "vod") {
+              const streams = await client.getVodStreams(cat.category_id);
+              return streams.map((s): BrowseItem => {
+                if (s.stream_icon) preloadImage(s.stream_icon);
+                return {
+                  id: String(s.stream_id),
+                  name: s.name,
+                  categoryId: s.category_id,
+                  containerExtension: s.container_extension,
+                  poster: s.stream_icon || undefined,
+                  rating: s.rating || undefined,
+                };
+              });
+            } else {
+              const series = await client.getSeries(cat.category_id);
+              return series.map((s): BrowseItem => {
+                if (s.cover) preloadImage(s.cover);
+                return {
+                  id: String(s.series_id),
+                  name: s.name,
+                  categoryId: s.category_id,
+                  seriesId: s.series_id,
+                  poster: s.cover || undefined,
+                  rating: s.rating || undefined,
+                  plot: s.plot || undefined,
+                  genre: s.genre || undefined,
+                };
+              });
+            }
+          })
+        );
+
+        rows = [...rows];
+        for (let j = 0; j < batch.length; j++) {
+          const idx = i + j;
+          const result = results[j];
+          if (idx < rows.length) {
+            rows[idx] = {
+              ...rows[idx],
+              items: result.status === "fulfilled" ? result.value : [],
+              loading: false,
+            };
+          }
+        }
+        notifyBrowseUpdate(contentType, rows);
+      }
+    } finally {
+      browseLoadingPromises[contentType] = undefined;
+    }
+  })();
+
+  browseLoadingPromises[contentType] = promise;
+  return promise;
+}
 
 function PosterCard({
   item,
@@ -264,111 +361,25 @@ export default function NetflixBrowse({
   accentColor = "#e91e63",
 }: NetflixBrowseProps) {
   const [rows, setRows] = useState<CategoryRow[]>(() => browseCache[contentType] || []);
-  const [loading, setLoading] = useState(!browseCache[contentType]);
   const [error, setError] = useState("");
 
   useEffect(() => {
-    // If we have cached data, use it
-    if (browseCache[contentType] && browseCache[contentType].length > 0) {
-      setRows(browseCache[contentType]);
-      setLoading(false);
-      return;
-    }
-
-    let cancelled = false;
-    setLoading(true);
+    setRows(browseCache[contentType] || []);
     setError("");
-    setRows([]);
 
-    (async () => {
-      try {
-        const cats =
-          contentType === "vod"
-            ? await client.getVodCategories()
-            : await client.getSeriesCategories();
+    const listener: BrowseListener = (r) => setRows(r);
+    browseListeners[contentType].add(listener);
 
-        if (cancelled) return;
+    preloadBrowseData(client, contentType).catch((e) => {
+      setError(e instanceof Error ? e.message : String(e));
+    });
 
-        // Show ALL categories
-        const allCats = cats;
-
-        setRows(allCats.map((cat) => ({ category: cat, items: [], loading: true })));
-        setLoading(false);
-
-        // Preload poster images as we fetch
-        const preloadImage = (url: string) => {
-          const img = new Image();
-          img.src = url;
-        };
-
-        // Load category items in batches of 4
-        for (let i = 0; i < allCats.length; i += 4) {
-          if (cancelled) return;
-          const batch = allCats.slice(i, i + 4);
-          const results = await Promise.allSettled(
-            batch.map(async (cat) => {
-              if (contentType === "vod") {
-                const streams = await client.getVodStreams(cat.category_id);
-                return streams.map((s): BrowseItem => {
-                  if (s.stream_icon) preloadImage(s.stream_icon);
-                  return {
-                    id: String(s.stream_id),
-                    name: s.name,
-                    categoryId: s.category_id,
-                    containerExtension: s.container_extension,
-                    poster: s.stream_icon || undefined,
-                    rating: s.rating || undefined,
-                  };
-                });
-              } else {
-                const series = await client.getSeries(cat.category_id);
-                return series.map((s): BrowseItem => {
-                  if (s.cover) preloadImage(s.cover);
-                  return {
-                    id: String(s.series_id),
-                    name: s.name,
-                    categoryId: s.category_id,
-                    seriesId: s.series_id,
-                    poster: s.cover || undefined,
-                    rating: s.rating || undefined,
-                    plot: s.plot || undefined,
-                    genre: s.genre || undefined,
-                  };
-                });
-              }
-            })
-          );
-
-          if (cancelled) return;
-
-          setRows((prev) => {
-            const next = [...prev];
-            for (let j = 0; j < batch.length; j++) {
-              const idx = i + j;
-              const result = results[j];
-              if (idx < next.length) {
-                next[idx] = {
-                  ...next[idx],
-                  items: result.status === "fulfilled" ? result.value : [],
-                  loading: false,
-                };
-              }
-            }
-            // Update cache
-            browseCache[contentType] = next;
-            return next;
-          });
-        }
-      } catch (e) {
-        if (!cancelled) {
-          setError(e instanceof Error ? e.message : String(e));
-          setLoading(false);
-        }
-      }
-    })();
-
-    return () => { cancelled = true; };
+    return () => {
+      browseListeners[contentType].delete(listener);
+    };
   }, [client, contentType]);
+
+  const loading = rows.length === 0 && !error;
 
   if (loading) {
     return (
