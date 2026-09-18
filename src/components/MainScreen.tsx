@@ -9,8 +9,8 @@ import {
   Search,
   Heart,
   Settings,
-  X,
 } from "lucide-react";
+import { X } from "lucide-react";
 import { XtreamClient } from "@/lib/xtream";
 import { useFavorites, type FavoriteEntry } from "@/lib/favorites";
 import { loadSettings, saveSettings, ACCENT_COLORS, t, type AppSettings } from "@/lib/settings";
@@ -48,17 +48,20 @@ const liveCache: { categories: Category[] | null; allStreams: SidebarItem[] | nu
   allStreams: null,
 };
 
-const PLAYBACK_PRIORITY_MS = 6000;
+// Live channel playback only needs to win the bandwidth race for a few
+// seconds while the stream connects -- after that it's a steady low
+// bitrate feed, so background loading can safely resume.
+const LIVE_PRIORITY_MS = 6000;
 
-// Order of tabs in the nav, used only to bias the slide direction of the
-// crossfade below (does not affect which tabs stay mounted).
+// Order of tabs in the nav, used to place each pane's resting position
+// (left or right of the active tab) so the crossfade always slides in the
+// direction that matches where the destination tab sits in the menu.
 const TAB_ORDER: AppTab[] = ["live", "vod", "series", "search", "favorites", "downloads"];
 
 export default function MainScreen({ client, userInfo, session, onLogout }: MainScreenProps) {
   const [activeTab, setActiveTab] = useState<AppTab>("live");
   const [appSettings, setAppSettings] = useState<AppSettings>(() => loadSettings());
   const [showSettings, setShowSettings] = useState(false);
-  const [slideDir, setSlideDir] = useState<"forward" | "backward">("forward");
 
   const lang = appSettings.language;
   const accent = ACCENT_COLORS[appSettings.accentColor];
@@ -93,19 +96,46 @@ export default function MainScreen({ client, userInfo, session, onLogout }: Main
   const [allLiveStreams, setAllLiveStreams] = useState<SidebarItem[]>(liveCache.allStreams || []);
   const { favKeys, toggle: toggleFav, entries: favEntries } = useFavorites();
 
-  const resumeTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const liveResumeTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  // Whether we're currently holding background loading paused for an open
+  // VOD/episode overlay -- unlike live playback, this has no fixed timer:
+  // it stays paused for as long as the movie/episode is open, since a
+  // whole file needs to buffer, not just a live edge to connect. Resuming
+  // it early (as a fixed short timer previously did) meant NetflixBrowse's
+  // thumbnail/list fetching came back online and competed for bandwidth
+  // right in the middle of the movie still trying to load -- a real
+  // regression versus not having background tabs mounted at all.
+  const vodPausedRef = useRef(false);
 
-  const prioritizePlayback = () => {
+  const prioritizeLivePlayback = () => {
     pauseBackgroundLoading();
-    if (resumeTimerRef.current) clearTimeout(resumeTimerRef.current);
-    resumeTimerRef.current = setTimeout(() => {
+    if (liveResumeTimerRef.current) clearTimeout(liveResumeTimerRef.current);
+    liveResumeTimerRef.current = setTimeout(() => {
       resumeBackgroundLoading();
-    }, PLAYBACK_PRIORITY_MS);
+    }, LIVE_PRIORITY_MS);
+  };
+
+  const prioritizeVodPlayback = () => {
+    if (liveResumeTimerRef.current) {
+      clearTimeout(liveResumeTimerRef.current);
+      liveResumeTimerRef.current = null;
+    }
+    if (!vodPausedRef.current) {
+      vodPausedRef.current = true;
+      pauseBackgroundLoading();
+    }
+  };
+
+  const releaseVodPause = () => {
+    if (vodPausedRef.current) {
+      vodPausedRef.current = false;
+      resumeBackgroundLoading();
+    }
   };
 
   useEffect(() => {
     return () => {
-      if (resumeTimerRef.current) clearTimeout(resumeTimerRef.current);
+      if (liveResumeTimerRef.current) clearTimeout(liveResumeTimerRef.current);
       resumeBackgroundLoading();
     };
   }, []);
@@ -155,11 +185,9 @@ export default function MainScreen({ client, userInfo, session, onLogout }: Main
 
   const handleTabSwitch = (tab: AppTab) => {
     if (tab === activeTab) return;
-    const fromIdx = TAB_ORDER.indexOf(activeTab);
-    const toIdx = TAB_ORDER.indexOf(tab);
-    setSlideDir(toIdx > fromIdx ? "forward" : "backward");
     setActiveTab(tab);
     setOverlayPlayback(null);
+    releaseVodPause();
     if (tab === "live") {
       setLevel("categories");
       setItems([]);
@@ -191,7 +219,7 @@ export default function MainScreen({ client, userInfo, session, onLogout }: Main
   };
 
   const handleLiveItemClick = (item: SidebarItem) => {
-    prioritizePlayback();
+    prioritizeLivePlayback();
     setSelectedItem(item.id);
     const streamId = Number(item.id);
     const url = client.getLiveUrl(streamId);
@@ -199,7 +227,8 @@ export default function MainScreen({ client, userInfo, session, onLogout }: Main
   };
 
   const playLive = (streamId: number, name: string) => {
-    prioritizePlayback();
+    releaseVodPause();
+    prioritizeLivePlayback();
     const url = client.getLiveUrl(streamId);
     setPlayback({ url, title: name, isLive: true, streamId });
     setOverlayPlayback(null);
@@ -207,7 +236,7 @@ export default function MainScreen({ client, userInfo, session, onLogout }: Main
   };
 
   const playVod = (streamId: number, ext: string, name: string) => {
-    prioritizePlayback();
+    prioritizeVodPlayback();
     const url = client.getVodUrl(streamId, ext);
     setOverlayPlayback({ url, title: name, isLive: false });
   };
@@ -232,7 +261,7 @@ export default function MainScreen({ client, userInfo, session, onLogout }: Main
       alert("Could not determine episode ID. Please try another episode.");
       return;
     }
-    prioritizePlayback();
+    prioritizeVodPlayback();
     const url = client.getEpisodeUrl(episode.episode_id, episode.container_extension);
     setOverlayPlayback({ url, title: `${seriesName} - ${episode.title}`, isLive: false });
   };
@@ -307,10 +336,7 @@ export default function MainScreen({ client, userInfo, session, onLogout }: Main
   // Every tab is rendered simultaneously and kept mounted at all times --
   // switching only fades/slides between them via opacity + transform, so
   // NetflixBrowse's IntersectionObservers, scroll positions, and loaded
-  // category data are never torn down and rebuilt. That's what removed
-  // the "page reloads every time you switch tabs" flash: there is no
-  // remount happening anymore, just a CSS crossfade between panes that
-  // were already sitting in the DOM.
+  // category data are never torn down and rebuilt.
   const renderTabContent = (tab: AppTab) => {
     switch (tab) {
       case "live":
@@ -439,19 +465,7 @@ export default function MainScreen({ client, userInfo, session, onLogout }: Main
 
   return (
     <div className="h-screen bg-[#0d0f14] flex flex-col overflow-hidden">
-      <header className="flex-shrink-0 h-14 bg-[#141822] border-b border-white/5 flex items-center justify-between px-6 z-30">
-        <div className="flex items-center gap-3">
-          <div
-            className="w-8 h-8 rounded-lg flex items-center justify-center shadow-lg"
-            style={{ background: `linear-gradient(135deg, ${accent.primary}, ${accent.dark})`, boxShadow: `0 4px 14px ${accent.shadow}33` }}
-          >
-            <Tv className="w-4 h-4 text-white" strokeWidth={2.5} />
-          </div>
-          <span className="text-white font-bold text-sm tracking-tight">
-            IPTV<span style={{ color: accent.primary }}>.</span>
-          </span>
-        </div>
-
+      <header className="flex-shrink-0 h-14 flex items-center justify-between px-6 z-30">
         <nav className="flex items-center gap-1">
           {tabConfig.map(({ key, label, icon: Icon }) => (
             <button
@@ -493,16 +507,26 @@ export default function MainScreen({ client, userInfo, session, onLogout }: Main
 
       <div className="relative flex-1 overflow-hidden">
         {tabConfig.map(({ key }) => {
+          const activeIdx = TAB_ORDER.indexOf(activeTab);
+          const idx = TAB_ORDER.indexOf(key);
           const isActive = key === activeTab;
-          const offset = slideDir === "forward" ? -22 : 22;
+          // Each pane's resting position is tied to its own place in the
+          // nav relative to whichever tab is active: panes to the left of
+          // the active tab always rest slightly off-screen to the left,
+          // panes to the right rest to the right. That's what makes the
+          // motion coherent with the nav order in both directions -- no
+          // separate "forward/backward" direction state is needed, since
+          // every pane already knows which side it belongs on.
+          const dir = idx === activeIdx ? 0 : idx < activeIdx ? -1 : 1;
+          const x = dir * 56;
           return (
             <div
               key={key}
               className="absolute inset-0 flex"
               style={{
                 opacity: isActive ? 1 : 0,
-                transform: `translateX(${isActive ? 0 : offset}px) scale(${isActive ? 1 : 0.982})`,
-                transition: "opacity 420ms cubic-bezier(0.22, 1, 0.36, 1), transform 420ms cubic-bezier(0.22, 1, 0.36, 1)",
+                transform: `translateX(${x}px)`,
+                transition: "opacity 380ms cubic-bezier(0.22, 1, 0.36, 1), transform 380ms cubic-bezier(0.22, 1, 0.36, 1)",
                 pointerEvents: isActive ? "auto" : "none",
                 zIndex: isActive ? 10 : 0,
               }}
@@ -535,7 +559,7 @@ export default function MainScreen({ client, userInfo, session, onLogout }: Main
               <button
                 onClick={() => {
                   setOverlayPlayback(null);
-                  resumeBackgroundLoading();
+                  releaseVodPause();
                 }}
                 className="text-gray-400 hover:text-white transition-colors p-2 rounded-lg hover:bg-white/10"
               >
