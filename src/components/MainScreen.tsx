@@ -43,6 +43,11 @@ interface PlaybackInfo {
   streamId?: number;
 }
 
+const liveCache: { categories: Category[] | null; allStreams: SidebarItem[] | null } = {
+  categories: null,
+  allStreams: null,
+};
+
 export default function MainScreen({ client, userInfo, session, onLogout }: MainScreenProps) {
   const [activeTab, setActiveTab] = useState<AppTab>("live");
   const [appSettings, setAppSettings] = useState<AppSettings>(() => loadSettings());
@@ -57,22 +62,18 @@ export default function MainScreen({ client, userInfo, session, onLogout }: Main
     debouncedPushSettings(s);
   };
 
-  // Live tab state
   const [level, setLevel] = useState<SidebarLevel>("categories");
-  const [categories, setCategories] = useState<Category[]>([]);
+  const [categories, setCategories] = useState<Category[]>(liveCache.categories || []);
   const [items, setItems] = useState<SidebarItem[]>([]);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState("");
   const [selectedCategory, setSelectedCategory] = useState<string | null>(null);
   const [selectedItem, setSelectedItem] = useState<string | null>(null);
 
-  // Current playback
   const [playback, setPlayback] = useState<PlaybackInfo | null>(null);
 
-  // Overlay player for VOD/episodes (shown on top of browse views)
   const [overlayPlayback, setOverlayPlayback] = useState<PlaybackInfo | null>(null);
 
-  // Series detail modal
   const [seriesDetail, setSeriesDetail] = useState<{
     seriesId: number;
     name: string;
@@ -82,35 +83,45 @@ export default function MainScreen({ client, userInfo, session, onLogout }: Main
     genre?: string;
   } | null>(null);
 
-  const [allLiveStreams, setAllLiveStreams] = useState<SidebarItem[]>([]);
+  const [allLiveStreams, setAllLiveStreams] = useState<SidebarItem[]>(liveCache.allStreams || []);
   const { favKeys, toggle: toggleFav, entries: favEntries } = useFavorites();
 
   useEffect(() => {
     if (activeTab !== "live") return;
-    setLoading(true);
     setError("");
-    setCategories([]);
-    (async () => {
-      try {
-        const cats = await client.getLiveCategories();
-        setCategories(cats);
-        if (allLiveStreams.length === 0) {
-          client.getLiveStreams().then((streams) => {
-            setAllLiveStreams(
-              streams.map((s) => ({
-                id: String(s.stream_id),
-                name: s.name,
-                categoryId: s.category_id,
-              }))
-            );
-          }).catch(() => {});
-        }
-      } catch (e) {
-        setError(e instanceof Error ? e.message : String(e));
-      } finally {
-        setLoading(false);
-      }
-    })();
+
+    if (liveCache.categories) {
+      setCategories(liveCache.categories);
+      setLoading(false);
+    } else {
+      setLoading(true);
+      setCategories([]);
+      client
+        .getLiveCategories()
+        .then((cats) => {
+          liveCache.categories = cats;
+          setCategories(cats);
+        })
+        .catch((e) => setError(e instanceof Error ? e.message : String(e)))
+        .finally(() => setLoading(false));
+    }
+
+    if (liveCache.allStreams) {
+      setAllLiveStreams(liveCache.allStreams);
+    } else if (allLiveStreams.length === 0) {
+      client
+        .getLiveStreams()
+        .then((streams) => {
+          const mapped = streams.map((s) => ({
+            id: String(s.stream_id),
+            name: s.name,
+            categoryId: s.category_id,
+          }));
+          liveCache.allStreams = mapped;
+          setAllLiveStreams(mapped);
+        })
+        .catch(() => {});
+    }
   }, [client, activeTab]);
 
   const handleTabSwitch = (tab: AppTab) => {

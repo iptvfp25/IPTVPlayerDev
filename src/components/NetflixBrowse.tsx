@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useRef, useState } from "react";
+import { memo, useCallback, useEffect, useRef, useState } from "react";
 import { ChevronLeft, ChevronRight, Film, Clapperboard, Star, Play, Loader2, Heart, Eye, Download } from "lucide-react";
 import { XtreamClient } from "@/lib/xtream";
 import type { Category } from "@/types/xtream";
@@ -47,10 +47,6 @@ function handleDownloadVod(item: BrowseItem, client: XtreamClient) {
   triggerDownload(entry);
 }
 
-// Module-level cache so data survives tab switches, plus a tiny pub-sub so
-// any mounted NetflixBrowse instance re-renders as rows fill in -- whether
-// the fetch was kicked off by this component mounting, or ahead of time by
-// preloadBrowseData() during login.
 const browseCache: Record<string, CategoryRow[]> = {};
 type BrowseListener = (rows: CategoryRow[]) => void;
 const browseListeners: Record<string, Set<BrowseListener>> = { vod: new Set(), series: new Set() };
@@ -61,12 +57,20 @@ function notifyBrowseUpdate(contentType: "vod" | "series", rows: CategoryRow[]) 
   browseListeners[contentType].forEach((listener) => listener(rows));
 }
 
-// Fetches categories + items (with poster preloading) for a content type
-// and populates the shared cache incrementally. Safe to call multiple
-// times -- if a load is already in flight or already cached, it reuses it
-// instead of re-fetching. This is what lets LoginScreen kick off Movies and
-// Series loading during the login screen, so switching to those tabs for
-// the first time doesn't show a full loading spinner.
+// Fetches categories + items for a content type and populates the shared
+// cache incrementally. Safe to call multiple times -- if a load is already
+// in flight or already cached, it reuses it instead of re-fetching. This is
+// what lets LoginScreen kick off Movies and Series loading during the login
+// screen, so switching to those tabs for the first time doesn't show a full
+// loading spinner.
+//
+// Note: we intentionally do NOT eagerly preload every poster image here.
+// With large IPTV catalogs (thousands of items across dozens of categories)
+// firing off hundreds of Image() requests at once saturates the browser's
+// per-host connection limit and blocks everything else (including the API
+// calls themselves), which is what caused multi-second freezes when
+// switching tabs. Posters load lazily instead, via loading="lazy" on the
+// <img> tags in PosterCard, so only what's actually visible gets fetched.
 export function preloadBrowseData(client: XtreamClient, contentType: "vod" | "series"): Promise<void> {
   if (browseCache[contentType] && browseCache[contentType].length > 0) {
     return Promise.resolve();
@@ -83,43 +87,32 @@ export function preloadBrowseData(client: XtreamClient, contentType: "vod" | "se
       let rows: CategoryRow[] = cats.map((cat) => ({ category: cat, items: [], loading: true }));
       notifyBrowseUpdate(contentType, rows);
 
-      const preloadImage = (url: string) => {
-        const img = new Image();
-        img.src = url;
-      };
-
       for (let i = 0; i < cats.length; i += 4) {
         const batch = cats.slice(i, i + 4);
         const results = await Promise.allSettled(
           batch.map(async (cat) => {
             if (contentType === "vod") {
               const streams = await client.getVodStreams(cat.category_id);
-              return streams.map((s): BrowseItem => {
-                if (s.stream_icon) preloadImage(s.stream_icon);
-                return {
-                  id: String(s.stream_id),
-                  name: s.name,
-                  categoryId: s.category_id,
-                  containerExtension: s.container_extension,
-                  poster: s.stream_icon || undefined,
-                  rating: s.rating || undefined,
-                };
-              });
+              return streams.map((s): BrowseItem => ({
+                id: String(s.stream_id),
+                name: s.name,
+                categoryId: s.category_id,
+                containerExtension: s.container_extension,
+                poster: s.stream_icon || undefined,
+                rating: s.rating || undefined,
+              }));
             } else {
               const series = await client.getSeries(cat.category_id);
-              return series.map((s): BrowseItem => {
-                if (s.cover) preloadImage(s.cover);
-                return {
-                  id: String(s.series_id),
-                  name: s.name,
-                  categoryId: s.category_id,
-                  seriesId: s.series_id,
-                  poster: s.cover || undefined,
-                  rating: s.rating || undefined,
-                  plot: s.plot || undefined,
-                  genre: s.genre || undefined,
-                };
-              });
+              return series.map((s): BrowseItem => ({
+                id: String(s.series_id),
+                name: s.name,
+                categoryId: s.category_id,
+                seriesId: s.series_id,
+                poster: s.cover || undefined,
+                rating: s.rating || undefined,
+                plot: s.plot || undefined,
+                genre: s.genre || undefined,
+              }));
             }
           })
         );
@@ -147,7 +140,7 @@ export function preloadBrowseData(client: XtreamClient, contentType: "vod" | "se
   return promise;
 }
 
-function PosterCard({
+const PosterCard = memo(function PosterCard({
   item,
   contentType,
   onClick,
@@ -171,7 +164,10 @@ function PosterCard({
   );
 
   return (
-    <div className="flex-shrink-0 w-[150px] group">
+    <div
+      className="flex-shrink-0 w-[150px] group"
+      style={{ contentVisibility: "auto", containIntrinsicSize: "150px 260px" } as React.CSSProperties}
+    >
       <button
         onClick={onClick}
         className="relative rounded-lg overflow-hidden transition-all duration-200 hover:scale-[1.08] hover:z-10 w-full"
@@ -183,6 +179,7 @@ function PosterCard({
               alt={item.name}
               className="w-full h-full object-cover"
               loading="lazy"
+              decoding="async"
               onError={(e) => {
                 (e.target as HTMLImageElement).style.display = "none";
               }}
@@ -248,9 +245,9 @@ function PosterCard({
       </div>
     </div>
   );
-}
+});
 
-function HorizontalRow({
+const HorizontalRow = memo(function HorizontalRow({
   row,
   contentType,
   onItemClick,
@@ -282,7 +279,7 @@ function HorizontalRow({
     checkScroll();
     const el = scrollRef.current;
     if (!el) return;
-    el.addEventListener("scroll", checkScroll);
+    el.addEventListener("scroll", checkScroll, { passive: true });
     return () => el.removeEventListener("scroll", checkScroll);
   }, [checkScroll, row.items]);
 
@@ -308,7 +305,10 @@ function HorizontalRow({
   const favKey = contentType === "vod" ? "vod" : "series";
 
   return (
-    <div className="mb-8 group/row">
+    <div
+      className="mb-8 group/row"
+      style={{ contentVisibility: "auto", containIntrinsicSize: "auto 300px" } as React.CSSProperties}
+    >
       <h3 className="text-white font-semibold text-sm mb-3 px-6">{row.category.category_name}</h3>
       <div className="relative">
         {canScrollLeft && (
@@ -350,7 +350,7 @@ function HorizontalRow({
       </div>
     </div>
   );
-}
+});
 
 export default function NetflixBrowse({
   client,
