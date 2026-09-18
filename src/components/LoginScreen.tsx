@@ -8,8 +8,11 @@ interface LoginScreenProps {
 }
 
 const STORAGE_KEY = "xtream-credentials";
+const PRELOAD_ITEMS_PER_TYPE = 40;
+const PRELOAD_TIMEOUT_MS = 6000;
 
 type LoginMode = "credentials" | "url";
+type LoginStage = "idle" | "connecting" | "preloading";
 
 interface SavedCredentials {
   server: string;
@@ -59,6 +62,39 @@ function parseFullUrl(raw: string): SavedCredentials | null {
   return null;
 }
 
+// Extracts a usable image URL from an Xtream API item, trying the several
+// field names different providers use for poster/icon artwork.
+function extractImageUrl(item: any): string | null {
+  const candidate =
+    item?.stream_icon || item?.cover || item?.cover_big || item?.movie_image || item?.icon;
+  if (typeof candidate === "string" && candidate.trim().length > 0) {
+    return candidate.trim();
+  }
+  return null;
+}
+
+// Kicks off image downloads so they're already in the browser's cache by
+// the time the user reaches the browse screens, instead of loading lazily
+// (and visibly popping in) the first time each poster scrolls into view.
+// Resolves early via a timeout so a few slow/broken images never delay
+// login indefinitely.
+function preloadImages(urls: string[], timeoutMs: number): Promise<void> {
+  if (urls.length === 0) return Promise.resolve();
+  const loadPromises = urls.map(
+    (url) =>
+      new Promise<void>((resolve) => {
+        const img = new Image();
+        img.onload = () => resolve();
+        img.onerror = () => resolve();
+        img.src = url;
+      })
+  );
+  return Promise.race([
+    Promise.all(loadPromises).then(() => undefined),
+    new Promise<void>((resolve) => setTimeout(resolve, timeoutMs)),
+  ]);
+}
+
 export default function LoginScreen({ onLogin }: LoginScreenProps) {
   const [mode, setMode] = useState<LoginMode>("credentials");
   const [server, setServer] = useState("");
@@ -68,9 +104,11 @@ export default function LoginScreen({ onLogin }: LoginScreenProps) {
   const [showPassword, setShowPassword] = useState(false);
   const [remember, setRemember] = useState(false);
   const [error, setError] = useState("");
-  const [loading, setLoading] = useState(false);
+  const [stage, setStage] = useState<LoginStage>("idle");
   const serverRef = useRef<HTMLInputElement>(null);
   const urlRef = useRef<HTMLInputElement>(null);
+
+  const loading = stage !== "idle";
 
   useEffect(() => {
     const saved = loadSaved();
@@ -87,7 +125,7 @@ export default function LoginScreen({ onLogin }: LoginScreenProps) {
   const doLogin = useCallback(
     async (creds: SavedCredentials) => {
       setError("");
-      setLoading(true);
+      setStage("connecting");
       try {
         const client = new XtreamClient(creds.server, creds.username, creds.password);
         const userInfo = await client.login();
@@ -96,11 +134,28 @@ export default function LoginScreen({ onLogin }: LoginScreenProps) {
         } else {
           localStorage.removeItem(STORAGE_KEY);
         }
+
+        setStage("preloading");
+        try {
+          const [liveStreams, vodStreams, series] = await Promise.all([
+            client.getLiveStreams().catch(() => []),
+            client.getVodStreams().catch(() => []),
+            client.getSeries().catch(() => []),
+          ]);
+          const urls = [
+            ...liveStreams.slice(0, PRELOAD_ITEMS_PER_TYPE).map(extractImageUrl),
+            ...vodStreams.slice(0, PRELOAD_ITEMS_PER_TYPE).map(extractImageUrl),
+            ...series.slice(0, PRELOAD_ITEMS_PER_TYPE).map(extractImageUrl),
+          ].filter((u): u is string => !!u);
+          await preloadImages(urls, PRELOAD_TIMEOUT_MS);
+        } catch {
+          // Preloading is a nice-to-have; never block login on it failing.
+        }
+
         onLogin(client, userInfo);
       } catch (err) {
         setError(err instanceof Error ? err.message : String(err));
-      } finally {
-        setLoading(false);
+        setStage("idle");
       }
     },
     [remember, onLogin]
@@ -141,6 +196,9 @@ export default function LoginScreen({ onLogin }: LoginScreenProps) {
 
   const inputClass =
     "w-full bg-[#0d0f14] border border-white/10 rounded-xl px-4 py-3 text-white text-sm placeholder-gray-600 focus:outline-none focus:border-[#e91e63] focus:ring-2 focus:ring-[#e91e63]/20 transition-all";
+
+  const buttonLabel =
+    stage === "connecting" ? "Connecting..." : stage === "preloading" ? "Loading previews..." : "Connect";
 
   return (
     <div className="min-h-screen bg-[#0d0f14] flex items-center justify-center px-4 relative overflow-hidden">
@@ -270,7 +328,7 @@ export default function LoginScreen({ onLogin }: LoginScreenProps) {
                 {loading ? (
                   <>
                     <Loader2 className="w-4 h-4 animate-spin" />
-                    Connecting...
+                    {buttonLabel}
                   </>
                 ) : (
                   <>
@@ -327,7 +385,7 @@ export default function LoginScreen({ onLogin }: LoginScreenProps) {
                 {loading ? (
                   <>
                     <Loader2 className="w-4 h-4 animate-spin" />
-                    Connecting...
+                    {buttonLabel}
                   </>
                 ) : (
                   <>
