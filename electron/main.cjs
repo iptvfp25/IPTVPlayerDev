@@ -1,4 +1,4 @@
-const { app, BrowserWindow, Menu, shell } = require('electron');
+const { app, BrowserWindow, Menu, shell, ipcMain } = require('electron');
 const path = require('path');
 
 let mainWindow;
@@ -13,8 +13,11 @@ function createWindow() {
     minHeight: 600,
     backgroundColor: '#0a0a0a',
     title: 'IPTV Desktop Player',
-    fullscreenable: true,
-    resizable: true,
+    // Frameless window: the OS title bar (with the app name) is gone.
+    // Since there's no native frame anymore, the renderer provides its own
+    // draggable region and minimize/maximize/close buttons -- wired up via
+    // the ipcMain handlers below and exposed through preload.cjs.
+    frame: false,
     webPreferences: {
       contextIsolation: true,
       nodeIntegration: false,
@@ -31,21 +34,6 @@ function createWindow() {
     return { action: 'allow' };
   });
 
-  // Native OS-level fullscreen toggle for the whole app window (F11),
-  // separate from the in-page <video> Fullscreen API used by VideoPlayer.
-  // Native fullscreen also removes the OS title bar, so the window can no
-  // longer be dragged/moved while fullscreen -- this fixes the "rimane
-  // spostabile" issue since dragging only worked via the title bar.
-  mainWindow.webContents.on('before-input-event', (event, input) => {
-    if (input.type === 'keyDown' && input.key === 'F11') {
-      mainWindow.setFullScreen(!mainWindow.isFullScreen());
-      event.preventDefault();
-    }
-    if (input.type === 'keyDown' && input.key === 'Escape' && mainWindow.isFullScreen()) {
-      mainWindow.setFullScreen(false);
-    }
-  });
-
   if (isDev) {
     mainWindow.loadURL('http://localhost:5173');
     mainWindow.webContents.openDevTools();
@@ -55,6 +43,23 @@ function createWindow() {
 
   Menu.setApplicationMenu(null);
 }
+
+ipcMain.on('window-minimize', () => {
+  mainWindow?.minimize();
+});
+
+ipcMain.on('window-maximize', () => {
+  if (!mainWindow) return;
+  if (mainWindow.isMaximized()) {
+    mainWindow.unmaximize();
+  } else {
+    mainWindow.maximize();
+  }
+});
+
+ipcMain.on('window-close', () => {
+  mainWindow?.close();
+});
 
 app.whenReady().then(() => {
   createWindow();
