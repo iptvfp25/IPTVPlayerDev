@@ -50,10 +50,16 @@ const liveCache: { categories: Category[] | null; allStreams: SidebarItem[] | nu
 
 const PLAYBACK_PRIORITY_MS = 6000;
 
+// Order of tabs in the nav, used to figure out whether a switch is moving
+// "forward" or "backward" so the slide direction matches the direction the
+// user is navigating instead of always sliding the same way.
+const TAB_ORDER: AppTab[] = ["live", "vod", "series", "search", "favorites", "downloads"];
+
 export default function MainScreen({ client, userInfo, session, onLogout }: MainScreenProps) {
   const [activeTab, setActiveTab] = useState<AppTab>("live");
   const [appSettings, setAppSettings] = useState<AppSettings>(() => loadSettings());
   const [showSettings, setShowSettings] = useState(false);
+  const [slideDir, setSlideDir] = useState<"forward" | "backward">("forward");
 
   const lang = appSettings.language;
   const accent = ACCENT_COLORS[appSettings.accentColor];
@@ -145,6 +151,9 @@ export default function MainScreen({ client, userInfo, session, onLogout }: Main
 
   const handleTabSwitch = (tab: AppTab) => {
     if (tab === activeTab) return;
+    const fromIdx = TAB_ORDER.indexOf(activeTab);
+    const toIdx = TAB_ORDER.indexOf(tab);
+    setSlideDir(toIdx > fromIdx ? "forward" : "backward");
     setActiveTab(tab);
     setOverlayPlayback(null);
     if (tab === "live") {
@@ -294,12 +303,38 @@ export default function MainScreen({ client, userInfo, session, onLogout }: Main
   return (
     <div className="h-screen bg-[#0d0f14] flex flex-col overflow-hidden">
       <style>{`
-        @keyframes tabFadeSlideIn {
-          from { opacity: 0; transform: translateY(14px) scale(0.985); }
-          to { opacity: 1; transform: translateY(0) scale(1); }
+        @keyframes tabSlideInForward {
+          0%   { opacity: 0; transform: translateX(70px) scale(0.94); filter: blur(10px); }
+          55%  { opacity: 1; }
+          100% { opacity: 1; transform: translateX(0) scale(1); filter: blur(0); }
         }
-        .tab-transition {
-          animation: tabFadeSlideIn 320ms cubic-bezier(0.22, 1, 0.36, 1);
+        @keyframes tabSlideInBackward {
+          0%   { opacity: 0; transform: translateX(-70px) scale(0.94); filter: blur(10px); }
+          55%  { opacity: 1; }
+          100% { opacity: 1; transform: translateX(0) scale(1); filter: blur(0); }
+        }
+        @keyframes accentWipe {
+          0%   { transform: scaleX(0); opacity: 0.9; }
+          60%  { transform: scaleX(1); opacity: 0.6; }
+          100% { transform: scaleX(1); opacity: 0; }
+        }
+        .tab-transition-forward {
+          animation: tabSlideInForward 480ms cubic-bezier(0.16, 1.15, 0.35, 1);
+          will-change: transform, opacity, filter;
+        }
+        .tab-transition-backward {
+          animation: tabSlideInBackward 480ms cubic-bezier(0.16, 1.15, 0.35, 1);
+          will-change: transform, opacity, filter;
+        }
+        .tab-accent-wipe {
+          position: absolute;
+          top: 0;
+          left: 0;
+          right: 0;
+          height: 3px;
+          transform-origin: left;
+          animation: accentWipe 480ms ease-out;
+          pointer-events: none;
         }
       `}</style>
 
@@ -355,7 +390,20 @@ export default function MainScreen({ client, userInfo, session, onLogout }: Main
         </div>
       </header>
 
-      <div key={activeTab} className="flex-1 flex overflow-hidden tab-transition">
+      <div className="relative flex-shrink-0">
+        <div
+          key={`wipe-${activeTab}`}
+          className="tab-accent-wipe"
+          style={{ backgroundColor: accent.primary }}
+        />
+      </div>
+
+      <div
+        key={activeTab}
+        className={`flex-1 flex overflow-hidden ${
+          slideDir === "forward" ? "tab-transition-forward" : "tab-transition-backward"
+        }`}
+      >
         {activeTab === "live" && (
           <>
             <div className="flex-1 flex flex-col p-6 overflow-y-auto sidebar-scroll min-w-0">
@@ -480,7 +528,7 @@ export default function MainScreen({ client, userInfo, session, onLogout }: Main
 
       {/* Overlay player for VOD / Episodes */}
       {overlayPlayback && (
-        <div className="fixed inset-0 bg-black/90 z-50 flex flex-col items-center justify-center p-4 tab-transition">
+        <div className="fixed inset-0 bg-black/90 z-50 flex flex-col items-center justify-center p-4 tab-transition-forward">
           <div className="w-full max-w-5xl">
             <div className="flex items-center justify-between mb-4">
               <h3 className="text-white font-semibold text-lg truncate pr-4">
