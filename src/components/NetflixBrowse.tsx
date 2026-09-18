@@ -57,20 +57,22 @@ function notifyBrowseUpdate(contentType: "vod" | "series", rows: CategoryRow[]) 
   browseListeners[contentType].forEach((listener) => listener(rows));
 }
 
-// Fetches categories + items for a content type and populates the shared
-// cache incrementally. Safe to call multiple times -- if a load is already
-// in flight or already cached, it reuses it instead of re-fetching. This is
-// what lets LoginScreen kick off Movies and Series loading during the login
-// screen, so switching to those tabs for the first time doesn't show a full
-// loading spinner.
+// Fetches categories + ALL items for a content type in just two network
+// requests total, then groups items into their categories locally in JS.
 //
-// Note: we intentionally do NOT eagerly preload every poster image here.
-// With large IPTV catalogs (thousands of items across dozens of categories)
-// firing off hundreds of Image() requests at once saturates the browser's
-// per-host connection limit and blocks everything else (including the API
-// calls themselves), which is what caused multi-second freezes when
-// switching tabs. Posters load lazily instead, via loading="lazy" on the
-// <img> tags in PosterCard, so only what's actually visible gets fetched.
+// This used to fetch items per-category (one request per category, batched
+// 4 at a time), which meant dozens of sequential round-trips through the
+// Supabase proxy for catalogs with many categories -- each one paying the
+// full network + proxy latency cost. That's what caused the multi-second
+// (sometimes 20s+) delay switching into Movies/Series. Fetching everything
+// in one shot and grouping in memory is essentially instant by comparison,
+// even for catalogs with thousands of items -- JSON parsing and a single
+// grouping pass over a few thousand objects takes low milliseconds.
+//
+// Safe to call multiple times -- if a load is already in flight or already
+// cached, it reuses it instead of re-fetching. LoginScreen kicks this off
+// for both "vod" and "series" during the login screen so switching to those
+// tabs for the first time doesn't show a full loading spinner.
 export function preloadBrowseData(client: XtreamClient, contentType: "vod" | "series"): Promise<void> {
   if (browseCache[contentType] && browseCache[contentType].length > 0) {
     return Promise.resolve();
@@ -81,56 +83,44 @@ export function preloadBrowseData(client: XtreamClient, contentType: "vod" | "se
 
   const promise = (async () => {
     try {
-      const cats =
-        contentType === "vod" ? await client.getVodCategories() : await client.getSeriesCategories();
+      const [cats, allItems] = await Promise.all([
+        contentType === "vod" ? client.getVodCategories() : client.getSeriesCategories(),
+        contentType === "vod" ? client.getVodStreams() : client.getSeries(),
+      ]);
 
-      let rows: CategoryRow[] = cats.map((cat) => ({ category: cat, items: [], loading: true }));
-      notifyBrowseUpdate(contentType, rows);
-
-      for (let i = 0; i < cats.length; i += 4) {
-        const batch = cats.slice(i, i + 4);
-        const results = await Promise.allSettled(
-          batch.map(async (cat) => {
-            if (contentType === "vod") {
-              const streams = await client.getVodStreams(cat.category_id);
-              return streams.map((s): BrowseItem => ({
-                id: String(s.stream_id),
-                name: s.name,
-                categoryId: s.category_id,
-                containerExtension: s.container_extension,
-                poster: s.stream_icon || undefined,
-                rating: s.rating || undefined,
-              }));
-            } else {
-              const series = await client.getSeries(cat.category_id);
-              return series.map((s): BrowseItem => ({
-                id: String(s.series_id),
-                name: s.name,
-                categoryId: s.category_id,
-                seriesId: s.series_id,
-                poster: s.cover || undefined,
-                rating: s.rating || undefined,
-                plot: s.plot || undefined,
-                genre: s.genre || undefined,
-              }));
-            }
-          })
-        );
-
-        rows = [...rows];
-        for (let j = 0; j < batch.length; j++) {
-          const idx = i + j;
-          const result = results[j];
-          if (idx < rows.length) {
-            rows[idx] = {
-              ...rows[idx],
-              items: result.status === "fulfilled" ? result.value : [],
-              loading: false,
-            };
-          }
-        }
-        notifyBrowseUpdate(contentType, rows);
+      const byCategory = new Map<string, BrowseItem[]>();
+      for (const raw of allItems as any[]) {
+        const item: BrowseItem =
+          contentType === "vod"
+            ? {
+                id: String(raw.stream_id),
+                name: raw.name,
+                categoryId: raw.category_id,
+                containerExtension: raw.container_extension,
+                poster: raw.stream_icon || undefined,
+                rating: raw.rating || undefined,
+              }
+            : {
+                id: String(raw.series_id),
+                name: raw.name,
+                categoryId: raw.category_id,
+                seriesId: raw.series_id,
+                poster: raw.cover || undefined,
+                rating: raw.rating || undefined,
+                plot: raw.plot || undefined,
+                genre: raw.genre || undefined,
+              };
+        const list = byCategory.get(item.categoryId);
+        if (list) list.push(item);
+        else byCategory.set(item.categoryId, [item]);
       }
+
+      const rows: CategoryRow[] = cats.map((cat) => ({
+        category: cat,
+        items: byCategory.get(cat.category_id) || [],
+        loading: false,
+      }));
+      notifyBrowseUpdate(contentType, rows);
     } finally {
       browseLoadingPromises[contentType] = undefined;
     }
