@@ -1,5 +1,5 @@
 import { useMemo, useState } from "react";
-import { ChevronLeft, Loader2, Search, Radio } from "lucide-react";
+import { ChevronLeft, Loader2, Search, Radio, Heart } from "lucide-react";
 import type { Category, EpisodeItem, ContentType } from "@/types/xtream";
 
 export type SidebarLevel = "categories" | "items" | "episodes";
@@ -35,6 +35,8 @@ interface SidebarProps {
   currentSeriesName: string;
   accentColor?: string;
   allStreams?: SidebarItem[];
+  favorites?: Set<string>;
+  onToggleFavorite?: (item: SidebarItem) => void;
 }
 
 export default function Sidebar({
@@ -50,6 +52,8 @@ export default function Sidebar({
   onItemClick,
   onBackToCategories,
   allStreams = [],
+  favorites,
+  onToggleFavorite,
 }: SidebarProps) {
   const [search, setSearch] = useState("");
 
@@ -73,7 +77,44 @@ export default function Sidebar({
     return allStreams.filter((s) => s.name.toLowerCase().includes(q));
   }, [level, search, allStreams]);
 
+  const favoriteChannels = useMemo(() => {
+    if (!favorites || favorites.size === 0 || allStreams.length === 0) return [];
+    return allStreams.filter((s) => favorites.has(`live:${s.id}`));
+  }, [favorites, allStreams]);
+
   const isGlobalSearch = level === "categories" && search.length >= 2 && allStreams.length > 0;
+
+  const renderChannelRow = (item: SidebarItem, active: boolean) => {
+    const isFav = favorites?.has(`live:${item.id}`) ?? false;
+    return (
+      <div key={item.id} className="flex items-center gap-1">
+        <button
+          onClick={() => onItemClick(item)}
+          className={`flex-1 text-left px-3 py-3 rounded-lg text-sm transition-all hover:scale-[1.02] border-l-2 ${
+            active ? "text-white font-medium" : "text-gray-300 hover:bg-white/5 border-transparent"
+          }`}
+          style={active ? { borderColor: accentColor, background: `linear-gradient(to right, ${accentColor}20, transparent)` } : undefined}
+        >
+          <div className="flex items-center gap-2">
+            <span className="w-2 h-2 rounded-full bg-red-500 animate-pulse flex-shrink-0" />
+            <span className="truncate">{item.name}</span>
+          </div>
+        </button>
+        {onToggleFavorite && (
+          <button
+            onClick={(e) => { e.stopPropagation(); onToggleFavorite(item); }}
+            className="flex-shrink-0 pr-2"
+            title={isFav ? "Remove from favorites" : "Add to favorites"}
+          >
+            <Heart
+              className={`w-4 h-4 transition-colors ${isFav ? "fill-current" : "text-gray-600 hover:text-current"}`}
+              style={{ color: isFav ? accentColor : undefined }}
+            />
+          </button>
+        )}
+      </div>
+    );
+  };
 
   return (
     <div className="w-[480px] flex-shrink-0 bg-[#141822] flex flex-col h-full border-l border-white/5">
@@ -126,27 +167,21 @@ export default function Sidebar({
                 {searchResults.length === 0 && (
                   <div className="px-3 py-8 text-center text-gray-500 text-sm">No channels found.</div>
                 )}
-                {searchResults.map((item) => {
-                  const active = selectedItem === item.id;
-                  return (
-                    <button
-                      key={item.id}
-                      onClick={() => onItemClick(item)}
-                      className={`w-full text-left px-3 py-3 rounded-lg text-sm transition-all hover:scale-[1.02] border-l-2 ${
-                        active ? "text-white font-medium" : "text-gray-300 hover:bg-white/5 border-transparent"
-                      }`}
-                      style={active ? { borderColor: accentColor, background: `linear-gradient(to right, ${accentColor}20, transparent)` } : undefined}
-                    >
-                      <div className="flex items-center gap-2">
-                        <span className="w-2 h-2 rounded-full bg-red-500 animate-pulse flex-shrink-0" />
-                        <span className="truncate">{item.name}</span>
-                      </div>
-                    </button>
-                  );
-                })}
+                {searchResults.map((item) => renderChannelRow(item, selectedItem === item.id))}
               </>
             ) : (
               <>
+                {favoriteChannels.length > 0 && (
+                  <div className="mb-3">
+                    <div className="px-3 py-2 text-xs font-medium text-gray-500 uppercase tracking-wide flex items-center gap-1.5">
+                      <Heart className="w-3 h-3 fill-current" style={{ color: accentColor }} />
+                      Favorites
+                    </div>
+                    {favoriteChannels.map((item) => renderChannelRow(item, selectedItem === item.id))}
+                    <div className="h-px bg-white/5 my-2 mx-3" />
+                  </div>
+                )}
+
                 {filteredCategories.length === 0 && (
                   <div className="px-3 py-8 text-center text-gray-500 text-sm">No categories found.</div>
                 )}
@@ -178,24 +213,7 @@ export default function Sidebar({
             {filteredItems.length === 0 && (
               <div className="px-3 py-8 text-center text-gray-500 text-sm">No channels found.</div>
             )}
-            {filteredItems.map((item) => {
-              const active = selectedItem === item.id;
-              return (
-                <button
-                  key={item.id}
-                  onClick={() => onItemClick(item)}
-                  className={`w-full text-left px-3 py-3 rounded-lg text-sm transition-all hover:scale-[1.02] border-l-2 ${
-                    active ? "text-white font-medium" : "text-gray-300 hover:bg-white/5 border-transparent"
-                  }`}
-                  style={active ? { borderColor: accentColor, background: `linear-gradient(to right, ${accentColor}20, transparent)` } : undefined}
-                >
-                  <div className="flex items-center gap-2">
-                    <span className="w-2 h-2 rounded-full bg-red-500 animate-pulse flex-shrink-0" />
-                    <span className="truncate">{item.name}</span>
-                  </div>
-                </button>
-              );
-            })}
+            {filteredItems.map((item) => renderChannelRow(item, selectedItem === item.id))}
           </div>
         )}
       </div>
