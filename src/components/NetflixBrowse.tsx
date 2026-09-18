@@ -21,6 +21,7 @@ interface CategoryRow {
   category: Category;
   items: BrowseItem[];
   loading: boolean;
+  loaded: boolean;
 }
 
 interface NetflixBrowseProps {
@@ -50,87 +51,128 @@ function handleDownloadVod(item: BrowseItem, client: XtreamClient) {
 const browseCache: Record<string, CategoryRow[]> = {};
 type BrowseListener = (rows: CategoryRow[]) => void;
 const browseListeners: Record<string, Set<BrowseListener>> = { vod: new Set(), series: new Set() };
-const browseLoadingPromises: Record<string, Promise<void> | undefined> = {};
+const categoriesLoadingPromises: Record<string, Promise<void> | undefined> = {};
 
 function notifyBrowseUpdate(contentType: "vod" | "series", rows: CategoryRow[]) {
   browseCache[contentType] = rows;
   browseListeners[contentType].forEach((listener) => listener(rows));
 }
 
-// Fetches categories fast first (small payload -> rows + spinners appear
-// almost instantly), then fetches the full catalog in ONE request (instead
-// of one request per category) and groups items into their categories
-// locally in JS once that resolves.
-//
-// The full-catalog request is the slow part on some Xtream panels -- an
-// unfiltered "get_vod_streams" / "get_series" dump is a heavier query on
-// their end than a single filtered category, so this can genuinely take a
-// few seconds server-side regardless of what we do client-side. Showing
-// categories with spinners immediately (instead of a blank screen while
-// everything loads) makes that wait feel responsive instead of frozen.
-//
-// Safe to call multiple times -- if a load is already in flight or already
-// cached, it reuses it instead of re-fetching. LoginScreen kicks this off
-// for both "vod" and "series" during the login screen so switching to those
-// tabs for the first time doesn't show a full loading spinner.
+function toBrowseItem(raw: any, contentType: "vod" | "series"): BrowseItem {
+  return contentType === "vod"
+    ? {
+        id: String(raw.stream_id),
+        name: raw.name,
+        categoryId: raw.category_id,
+        containerExtension: raw.container_extension,
+        poster: raw.stream_icon || undefined,
+        rating: raw.rating || undefined,
+      }
+    : {
+        id: String(raw.series_id),
+        name: raw.name,
+        categoryId: raw.category_id,
+        seriesId: raw.series_id,
+        poster: raw.cover || undefined,
+        rating: raw.rating || undefined,
+        plot: raw.plot || undefined,
+        genre: raw.genre || undefined,
+      };
+}
+
+// Only fetches the category LIST (a small, fast request), never the full
+// catalog. Each category's actual items are fetched lazily, one category
+// at a time, only when that row scrolls into view (see loadCategoryItems
+// below). This replaced an earlier "fetch everything in one request"
+// approach that pulled the entire VOD/series catalog as a single JSON
+// response -- on this Xtream panel that single request measured 2.7MB and
+// took ~18 seconds in DevTools, which is exactly the kind of unfiltered,
+// whole-catalog query that's slow server-side regardless of how the client
+// batches it. Fetching only what's visible keeps every individual request
+// small and fast instead of waiting on one huge one.
 export function preloadBrowseData(client: XtreamClient, contentType: "vod" | "series"): Promise<void> {
   if (browseCache[contentType] && browseCache[contentType].length > 0) {
     return Promise.resolve();
   }
-  if (browseLoadingPromises[contentType]) {
-    return browseLoadingPromises[contentType]!;
+  if (categoriesLoadingPromises[contentType]) {
+    return categoriesLoadingPromises[contentType]!;
   }
 
   const promise = (async () => {
     try {
       const cats =
         contentType === "vod" ? await client.getVodCategories() : await client.getSeriesCategories();
-      const initialRows: CategoryRow[] = cats.map((cat) => ({ category: cat, items: [], loading: true }));
-      notifyBrowseUpdate(contentType, initialRows);
-
-      const allItems =
-        contentType === "vod" ? await client.getVodStreams() : await client.getSeries();
-
-      const byCategory = new Map<string, BrowseItem[]>();
-      for (const raw of allItems as any[]) {
-        const item: BrowseItem =
-          contentType === "vod"
-            ? {
-                id: String(raw.stream_id),
-                name: raw.name,
-                categoryId: raw.category_id,
-                containerExtension: raw.container_extension,
-                poster: raw.stream_icon || undefined,
-                rating: raw.rating || undefined,
-              }
-            : {
-                id: String(raw.series_id),
-                name: raw.name,
-                categoryId: raw.category_id,
-                seriesId: raw.series_id,
-                poster: raw.cover || undefined,
-                rating: raw.rating || undefined,
-                plot: raw.plot || undefined,
-                genre: raw.genre || undefined,
-              };
-        const list = byCategory.get(item.categoryId);
-        if (list) list.push(item);
-        else byCategory.set(item.categoryId, [item]);
-      }
-
-      const rows: CategoryRow[] = cats.map((cat) => ({
-        category: cat,
-        items: byCategory.get(cat.category_id) || [],
-        loading: false,
-      }));
+      const rows: CategoryRow[] = cats.map((cat) => ({ category: cat, items: [], loading: false, loaded: false }));
       notifyBrowseUpdate(contentType, rows);
     } finally {
-      browseLoadingPromises[contentType] = undefined;
+      categoriesLoadingPromises[contentType] = undefined;
     }
   })();
 
-  browseLoadingPromises[contentType] = promise;
+  categoriesLoadingPromises[contentType] = promise;
   return promise;
+}
+
+// Fetches items for a single category on demand, updating the shared cache
+// in place. De-duplicated per category id so scrolling a row in and out of
+// view repeatedly doesn't refetch.
+const categoryFetchInFlight = new Set<string>();
+
+async function loadCategoryItems(
+  client: XtreamClient,
+  contentType: "vod" | "series",
+  categoryId: string
+) {
+  const cacheKey = `${contentType}:${categoryId}`;
+  if (categoryFetchInFlight.has(cacheKey)) return;
+
+  const rows = browseCache[contentType];
+  if (!rows) return;
+  const idx = rows.findIndex((r) => r.category.category_id === categoryId);
+  if (idx === -1 || rows[idx].loaded || rows[idx].loading) return;
+
+  categoryFetchInFlight.add(cacheKey);
+  const loadingRows = [...rows];
+  loadingRows[idx] = { ...loadingRows[idx], loading: true };
+  notifyBrowseUpdate(contentType, loadingRows);
+
+  try {
+    const raw =
+      contentType === "vod" ? await client.getVodStreams(categoryId) : await client.getSeries(categoryId);
+    const items = raw.map((r: any) => toBrowseItem(r, contentType));
+
+    // This category's items just arrived -- kick off image loads for its
+    // posters right away instead of waiting for lazy <img loading="lazy">
+    // to notice they've scrolled into view. Scoped to a single category
+    // (tens of items, not the whole catalog), so it doesn't reintroduce
+    // the connection-saturation problem that a catalog-wide preload caused.
+    // By the time the user's scroll reaches this row, the browser likely
+    // already has these images cached.
+    for (const item of items) {
+      if (item.poster) {
+        const img = new Image();
+        img.src = item.poster;
+      }
+    }
+
+    const current = browseCache[contentType];
+    if (!current) return;
+    const currentIdx = current.findIndex((r) => r.category.category_id === categoryId);
+    if (currentIdx === -1) return;
+    const updated = [...current];
+    updated[currentIdx] = { ...updated[currentIdx], items, loading: false, loaded: true };
+    notifyBrowseUpdate(contentType, updated);
+  } catch {
+    const current = browseCache[contentType];
+    if (!current) return;
+    const currentIdx = current.findIndex((r) => r.category.category_id === categoryId);
+    if (currentIdx === -1) return;
+    const updated = [...current];
+    updated[currentIdx] = { ...updated[currentIdx], loading: false, loaded: true };
+    notifyBrowseUpdate(contentType, updated);
+  } finally {
+    categoryFetchInFlight.delete(cacheKey);
+  }
 }
 
 const PosterCard = memo(function PosterCard({
@@ -258,8 +300,29 @@ const HorizontalRow = memo(function HorizontalRow({
   client: XtreamClient;
 }) {
   const scrollRef = useRef<HTMLDivElement>(null);
+  const rootRef = useRef<HTMLDivElement>(null);
   const [canScrollLeft, setCanScrollLeft] = useState(false);
   const [canScrollRight, setCanScrollRight] = useState(false);
+
+  // Fetch this category's items the first time the row comes near the
+  // viewport (rootMargin gives it a head start before it's actually
+  // visible), instead of fetching every category up front.
+  useEffect(() => {
+    if (row.loaded || row.loading) return;
+    const el = rootRef.current;
+    if (!el) return;
+    const observer = new IntersectionObserver(
+      (entries) => {
+        if (entries[0]?.isIntersecting) {
+          loadCategoryItems(client, contentType, row.category.category_id);
+          observer.disconnect();
+        }
+      },
+      { rootMargin: "600px 0px" }
+    );
+    observer.observe(el);
+    return () => observer.disconnect();
+  }, [client, contentType, row.category.category_id, row.loaded, row.loading]);
 
   const checkScroll = useCallback(() => {
     const el = scrollRef.current;
@@ -282,65 +345,61 @@ const HorizontalRow = memo(function HorizontalRow({
     el.scrollBy({ left: dir === "left" ? -600 : 600, behavior: "smooth" });
   };
 
-  if (row.loading) {
-    return (
-      <div className="mb-8">
-        <h3 className="text-white font-semibold text-sm mb-3 px-6">{row.category.category_name}</h3>
-        <div className="flex items-center justify-center py-6">
-          <Loader2 className="w-5 h-5 animate-spin" style={{ color: accentColor }} />
-        </div>
-      </div>
-    );
-  }
-
-  if (row.items.length === 0) return null;
+  if (row.loaded && row.items.length === 0) return <div ref={rootRef} />;
 
   const favKey = contentType === "vod" ? "vod" : "series";
 
   return (
     <div
+      ref={rootRef}
       className="mb-8 group/row"
       style={{ contentVisibility: "auto", containIntrinsicSize: "auto 300px" } as React.CSSProperties}
     >
       <h3 className="text-white font-semibold text-sm mb-3 px-6">{row.category.category_name}</h3>
-      <div className="relative">
-        {canScrollLeft && (
-          <button
-            onClick={() => scroll("left")}
-            className="absolute left-0 top-0 bottom-6 w-10 z-10 bg-gradient-to-r from-[#0d0f14] to-transparent flex items-center justify-center opacity-0 group-hover/row:opacity-100 transition-opacity"
-          >
-            <ChevronLeft className="w-6 h-6 text-white" />
-          </button>
-        )}
-
-        <div
-          ref={scrollRef}
-          className="flex gap-3 overflow-x-auto px-6 scrollbar-hide"
-          style={{ scrollbarWidth: "none" }}
-        >
-          {row.items.map((item) => (
-            <PosterCard
-              key={item.id}
-              item={item}
-              contentType={contentType}
-              onClick={() => onItemClick(item)}
-              isFav={favorites.has(`${favKey}:${item.id}`)}
-              onToggleFav={() => onToggleFavorite(item)}
-              accentColor={accentColor}
-              onDownload={contentType === "vod" ? () => handleDownloadVod(item, client) : undefined}
-            />
-          ))}
+      {!row.loaded ? (
+        <div className="flex items-center justify-center py-6">
+          <Loader2 className="w-5 h-5 animate-spin" style={{ color: accentColor }} />
         </div>
+      ) : (
+        <div className="relative">
+          {canScrollLeft && (
+            <button
+              onClick={() => scroll("left")}
+              className="absolute left-0 top-0 bottom-6 w-10 z-10 bg-gradient-to-r from-[#0d0f14] to-transparent flex items-center justify-center opacity-0 group-hover/row:opacity-100 transition-opacity"
+            >
+              <ChevronLeft className="w-6 h-6 text-white" />
+            </button>
+          )}
 
-        {canScrollRight && (
-          <button
-            onClick={() => scroll("right")}
-            className="absolute right-0 top-0 bottom-6 w-10 z-10 bg-gradient-to-l from-[#0d0f14] to-transparent flex items-center justify-center opacity-0 group-hover/row:opacity-100 transition-opacity"
+          <div
+            ref={scrollRef}
+            className="flex gap-3 overflow-x-auto px-6 scrollbar-hide"
+            style={{ scrollbarWidth: "none" }}
           >
-            <ChevronRight className="w-6 h-6 text-white" />
-          </button>
-        )}
-      </div>
+            {row.items.map((item) => (
+              <PosterCard
+                key={item.id}
+                item={item}
+                contentType={contentType}
+                onClick={() => onItemClick(item)}
+                isFav={favorites.has(`${favKey}:${item.id}`)}
+                onToggleFav={() => onToggleFavorite(item)}
+                accentColor={accentColor}
+                onDownload={contentType === "vod" ? () => handleDownloadVod(item, client) : undefined}
+              />
+            ))}
+          </div>
+
+          {canScrollRight && (
+            <button
+              onClick={() => scroll("right")}
+              className="absolute right-0 top-0 bottom-6 w-10 z-10 bg-gradient-to-l from-[#0d0f14] to-transparent flex items-center justify-center opacity-0 group-hover/row:opacity-100 transition-opacity"
+            >
+              <ChevronRight className="w-6 h-6 text-white" />
+            </button>
+          )}
+        </div>
+      )}
     </div>
   );
 });
