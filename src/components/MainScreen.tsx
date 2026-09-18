@@ -9,9 +9,11 @@ import {
   Search,
   Heart,
   Settings,
+  Minus,
+  Square,
 } from "lucide-react";
 import { X } from "lucide-react";
-import { XtreamClient } from "@/lib/xtream";
+import { XtreamClient, isElectron } from "@/lib/xtream";
 import { useFavorites, type FavoriteEntry } from "@/lib/favorites";
 import { loadSettings, saveSettings, ACCENT_COLORS, t, type AppSettings } from "@/lib/settings";
 import { debouncedPushSettings } from "@/lib/sync";
@@ -133,6 +135,14 @@ export default function MainScreen({ client, userInfo, session, onLogout }: Main
     }
   };
 
+  const stopLivePlayback = () => {
+    if (liveResumeTimerRef.current) {
+      clearTimeout(liveResumeTimerRef.current);
+      liveResumeTimerRef.current = null;
+    }
+    setPlayback(null);
+  };
+
   useEffect(() => {
     return () => {
       if (liveResumeTimerRef.current) clearTimeout(liveResumeTimerRef.current);
@@ -185,6 +195,18 @@ export default function MainScreen({ client, userInfo, session, onLogout }: Main
 
   const handleTabSwitch = (tab: AppTab) => {
     if (tab === activeTab) return;
+    // Leaving the Live tab must actually stop the channel, not just hide
+    // it -- every tab stays mounted for the crossfade, so without this the
+    // live stream (and its network connection) would keep running silently
+    // behind whichever tab you switched to.
+    if (activeTab === "live" && playback) {
+      setPlayback(null);
+      if (liveResumeTimerRef.current) {
+        clearTimeout(liveResumeTimerRef.current);
+        liveResumeTimerRef.current = null;
+      }
+      resumeBackgroundLoading();
+    }
     setActiveTab(tab);
     setOverlayPlayback(null);
     releaseVodPause();
@@ -236,6 +258,12 @@ export default function MainScreen({ client, userInfo, session, onLogout }: Main
   };
 
   const playVod = (streamId: number, ext: string, name: string) => {
+    // Many Xtream providers allow only one active connection per account.
+    // If a live channel is still connected in the background, it competes
+    // with the movie for that single connection slot -- stopping it here
+    // is what actually fixed movies being slow to start, not just a
+    // bandwidth-sharing nicety.
+    stopLivePlayback();
     prioritizeVodPlayback();
     const url = client.getVodUrl(streamId, ext);
     setOverlayPlayback({ url, title: name, isLive: false });
@@ -261,6 +289,7 @@ export default function MainScreen({ client, userInfo, session, onLogout }: Main
       alert("Could not determine episode ID. Please try another episode.");
       return;
     }
+    stopLivePlayback();
     prioritizeVodPlayback();
     const url = client.getEpisodeUrl(episode.episode_id, episode.container_extension);
     setOverlayPlayback({ url, title: `${seriesName} - ${episode.title}`, isLive: false });
@@ -465,8 +494,14 @@ export default function MainScreen({ client, userInfo, session, onLogout }: Main
 
   return (
     <div className="h-screen bg-[#0d0f14] flex flex-col overflow-hidden">
-      <header className="flex-shrink-0 h-14 flex items-center justify-between px-6 z-30">
-        <nav className="flex items-center gap-1">
+      <header
+        className="flex-shrink-0 h-14 flex items-center justify-between px-6 z-30"
+        style={isElectron ? ({ WebkitAppRegion: "drag" } as React.CSSProperties) : undefined}
+      >
+        <nav
+          className="flex items-center gap-1"
+          style={isElectron ? ({ WebkitAppRegion: "no-drag" } as React.CSSProperties) : undefined}
+        >
           {tabConfig.map(({ key, label, icon: Icon }) => (
             <button
               key={key}
@@ -484,7 +519,10 @@ export default function MainScreen({ client, userInfo, session, onLogout }: Main
           ))}
         </nav>
 
-        <div className="flex items-center gap-1">
+        <div
+          className="flex items-center gap-1"
+          style={isElectron ? ({ WebkitAppRegion: "no-drag" } as React.CSSProperties) : undefined}
+        >
           <button
             onClick={() => setShowSettings(true)}
             className="flex items-center gap-2 text-gray-500 hover:text-white text-xs transition-colors px-2 py-1.5 rounded-lg hover:bg-white/5"
@@ -501,6 +539,31 @@ export default function MainScreen({ client, userInfo, session, onLogout }: Main
           </button>
           {session && (
             <div className="w-1.5 h-1.5 rounded-full bg-emerald-400 ml-1" title={t(lang, "syncEnabled")} />
+          )}
+          {isElectron && (
+            <div className="flex items-center gap-0.5 ml-3 pl-3 border-l border-white/10">
+              <button
+                onClick={() => (window as any).electronApp?.minimizeWindow?.()}
+                className="flex items-center justify-center w-7 h-7 text-gray-500 hover:text-white hover:bg-white/10 rounded-md transition-colors"
+                title="Minimize"
+              >
+                <Minus className="w-3.5 h-3.5" />
+              </button>
+              <button
+                onClick={() => (window as any).electronApp?.maximizeWindow?.()}
+                className="flex items-center justify-center w-7 h-7 text-gray-500 hover:text-white hover:bg-white/10 rounded-md transition-colors"
+                title="Maximize"
+              >
+                <Square className="w-3 h-3" />
+              </button>
+              <button
+                onClick={() => (window as any).electronApp?.closeWindow?.()}
+                className="flex items-center justify-center w-7 h-7 text-gray-500 hover:text-white hover:bg-red-600 rounded-md transition-colors"
+                title="Close"
+              >
+                <X className="w-3.5 h-3.5" />
+              </button>
+            </div>
           )}
         </div>
       </header>
