@@ -2,7 +2,7 @@ import { useMemo, useState } from "react";
 import { ChevronLeft, Loader2, Search, Radio, Heart } from "lucide-react";
 import type { Category, EpisodeItem, ContentType } from "@/types/xtream";
 
-export type SidebarLevel = "categories" | "items" | "episodes";
+export type SidebarLevel = "categories" | "items" | "episodes" | "favorites";
 
 export interface SidebarItem {
   id: string;
@@ -37,6 +37,7 @@ interface SidebarProps {
   allStreams?: SidebarItem[];
   favorites?: Set<string>;
   onToggleFavorite?: (item: SidebarItem) => void;
+  onShowFavorites?: () => void;
 }
 
 export default function Sidebar({
@@ -54,6 +55,7 @@ export default function Sidebar({
   allStreams = [],
   favorites,
   onToggleFavorite,
+  onShowFavorites,
 }: SidebarProps) {
   const [search, setSearch] = useState("");
 
@@ -116,6 +118,8 @@ export default function Sidebar({
     );
   };
 
+  const showBackButton = level === "items" || level === "favorites";
+
   return (
     <div className="w-[480px] flex-shrink-0 bg-[#141822] flex flex-col h-full border-l border-white/5">
       <div className="p-4 pb-3 flex-shrink-0">
@@ -134,7 +138,7 @@ export default function Sidebar({
         </div>
       </div>
 
-      {level === "items" && (
+      {showBackButton && (
         <button
           onClick={onBackToCategories}
           className="flex items-center gap-1.5 px-4 py-2 text-sm text-gray-400 hover:text-white transition-colors text-left group flex-shrink-0"
@@ -171,15 +175,17 @@ export default function Sidebar({
               </>
             ) : (
               <>
-                {favoriteChannels.length > 0 && (
-                  <div className="mb-3">
-                    <div className="px-3 py-2 text-xs font-medium text-gray-500 uppercase tracking-wide flex items-center gap-1.5">
-                      <Heart className="w-3 h-3 fill-current" style={{ color: accentColor }} />
-                      Favorites
+                {favoriteChannels.length > 0 && onShowFavorites && (
+                  <button
+                    onClick={onShowFavorites}
+                    className="w-full text-left px-3 py-3 rounded-lg text-sm transition-all hover:scale-[1.02] hover:bg-white/5 border-l-2 border-transparent mb-1"
+                  >
+                    <div className="flex items-center gap-3">
+                      <Heart className="w-4 h-4 flex-shrink-0 fill-current" style={{ color: accentColor }} />
+                      <span className="truncate text-gray-300 font-medium">Favorites</span>
+                      <span className="ml-auto text-xs text-gray-500">{favoriteChannels.length}</span>
                     </div>
-                    {favoriteChannels.map((item) => renderChannelRow(item, selectedItem === item.id))}
-                    <div className="h-px bg-white/5 my-2 mx-3" />
-                  </div>
+                  </button>
                 )}
 
                 {filteredCategories.length === 0 && (
@@ -214,6 +220,15 @@ export default function Sidebar({
               <div className="px-3 py-8 text-center text-gray-500 text-sm">No channels found.</div>
             )}
             {filteredItems.map((item) => renderChannelRow(item, selectedItem === item.id))}
+          </div>
+        )}
+
+        {!loading && !error && level === "favorites" && (
+          <div className="space-y-1 px-2">
+            {favoriteChannels.length === 0 && (
+              <div className="px-3 py-8 text-center text-gray-500 text-sm">No favorite channels yet.</div>
+            )}
+            {favoriteChannels.map((item) => renderChannelRow(item, selectedItem === item.id))}
           </div>
         )}
       </div>
