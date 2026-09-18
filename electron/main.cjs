@@ -13,6 +13,8 @@ function createWindow() {
     minHeight: 600,
     backgroundColor: '#0a0a0a',
     title: 'IPTV Desktop Player',
+    fullscreenable: true,
+    resizable: true,
     webPreferences: {
       contextIsolation: true,
       nodeIntegration: false,
@@ -27,6 +29,21 @@ function createWindow() {
       return { action: 'deny' };
     }
     return { action: 'allow' };
+  });
+
+  // Native OS-level fullscreen toggle for the whole app window (F11),
+  // separate from the in-page <video> Fullscreen API used by VideoPlayer.
+  // Native fullscreen also removes the OS title bar, so the window can no
+  // longer be dragged/moved while fullscreen -- this fixes the "rimane
+  // spostabile" issue since dragging only worked via the title bar.
+  mainWindow.webContents.on('before-input-event', (event, input) => {
+    if (input.type === 'keyDown' && input.key === 'F11') {
+      mainWindow.setFullScreen(!mainWindow.isFullScreen());
+      event.preventDefault();
+    }
+    if (input.type === 'keyDown' && input.key === 'Escape' && mainWindow.isFullScreen()) {
+      mainWindow.setFullScreen(false);
+    }
   });
 
   if (isDev) {
