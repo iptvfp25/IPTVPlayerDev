@@ -202,6 +202,17 @@ export default function MainScreen({ client, userInfo, session, onLogout }: Main
     toggleFav(item, ct as ContentType);
   };
 
+  const handleLiveFavToggle = (item: SidebarItem) => {
+    toggleFav(
+      {
+        id: item.id,
+        name: item.name,
+        categoryId: item.categoryId,
+      },
+      "live"
+    );
+  };
+
   const handleFavPlay = (entry: FavoriteEntry) => {
     if (entry.type === "live") {
       playLive(Number(entry.id), entry.name);
@@ -353,6 +364,8 @@ export default function MainScreen({ client, userInfo, session, onLogout }: Main
               currentSeriesName=""
               accentColor={accent.primary}
               allStreams={allLiveStreams}
+              favorites={favKeys}
+              onToggleFavorite={handleLiveFavToggle}
             />
           </>
         )}
