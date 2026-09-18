@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState, useCallback } from "react";
+import { useEffect, useRef, useState, useCallback, useLayoutEffect } from "react";
 import {
   Play,
   Pause,
@@ -63,6 +63,7 @@ export default function VideoPlayer({
   const hlsRef = useRef<Hls | null>(null);
   const mpegtsRef = useRef<mpegts.Player | null>(null);
   const hideTimer = useRef<ReturnType<typeof setTimeout>>();
+  const clickTimer = useRef<ReturnType<typeof setTimeout>>();
   const errorCountRef = useRef(0);
 
   const [playing, setPlaying] = useState(false);
@@ -200,6 +201,20 @@ export default function VideoPlayer({
     };
   }, [url, isLive, destroyPlayers]);
 
+  // Movies and series episodes should open in true fullscreen immediately,
+  // matching the expected UX. This runs in a layout effect (synchronous,
+  // right after DOM commit) rather than a regular effect, so it stays as
+  // close as possible to the original click's user-activation window --
+  // browsers require the Fullscreen API to be triggered by a real user
+  // gesture, and delaying too long (e.g. a normal async effect or a
+  // setTimeout) causes the request to be silently rejected.
+  useLayoutEffect(() => {
+    if (isLive) return;
+    if (!containerRef.current) return;
+    if (document.fullscreenElement) return;
+    containerRef.current.requestFullscreen().catch(() => {});
+  }, [url, isLive]);
+
   useEffect(() => {
     const video = videoRef.current;
     if (!video || !resumeTime || resumeTime <= 0) return;
@@ -306,22 +321,34 @@ export default function VideoPlayer({
     }
   };
 
+  const handleContainerClick = (e: React.MouseEvent) => {
+    if ((e.target as HTMLElement).closest("button, input")) return;
+    clearTimeout(clickTimer.current);
+    clickTimer.current = setTimeout(() => {
+      togglePlay();
+    }, 250);
+  };
+
+  const handleContainerDoubleClick = (e: React.MouseEvent) => {
+    if ((e.target as HTMLElement).closest("button, input")) return;
+    clearTimeout(clickTimer.current);
+    toggleFullscreen();
+  };
+
   const progress = duration > 0 ? (currentTime / duration) * 100 : 0;
 
   return (
     <div
       ref={containerRef}
-      className="relative aspect-video bg-black rounded-xl overflow-hidden group cursor-pointer select-none"
+      className={
+        isFullscreen
+          ? "relative bg-black overflow-hidden group cursor-pointer select-none fixed inset-0 z-[999] w-screen h-screen"
+          : "relative aspect-video bg-black rounded-xl overflow-hidden group cursor-pointer select-none"
+      }
       onMouseMove={resetHideTimer}
       onMouseLeave={() => playing && setShowControls(false)}
-      onClick={(e) => {
-        if ((e.target as HTMLElement).closest("button, input")) return;
-        togglePlay();
-      }}
-      onDoubleClick={(e) => {
-        if ((e.target as HTMLElement).closest("button, input")) return;
-        toggleFullscreen();
-      }}
+      onClick={handleContainerClick}
+      onDoubleClick={handleContainerDoubleClick}
     >
       <video
         ref={videoRef}
