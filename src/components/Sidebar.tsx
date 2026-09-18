@@ -40,6 +40,26 @@ interface SidebarProps {
   onShowFavorites?: () => void;
 }
 
+// Shows the channel's own logo (from the provider's stream_icon field) when
+// available, falling back to the plain pulsing dot if there's no icon URL
+// or if it fails to load (many Xtream panels have broken/missing logo
+// links for some channels -- this keeps the row looking fine either way).
+function ChannelLogo({ icon }: { icon?: string }) {
+  const [failed, setFailed] = useState(false);
+  if (icon && !failed) {
+    return (
+      <img
+        src={icon}
+        alt=""
+        loading="lazy"
+        onError={() => setFailed(true)}
+        className="w-6 h-6 rounded object-contain bg-black/30 flex-shrink-0"
+      />
+    );
+  }
+  return <span className="w-2 h-2 rounded-full bg-red-500 animate-pulse flex-shrink-0" />;
+}
+
 export default function Sidebar({
   level,
   categories,
@@ -98,7 +118,7 @@ export default function Sidebar({
           style={active ? { borderColor: accentColor, background: `linear-gradient(to right, ${accentColor}20, transparent)` } : undefined}
         >
           <div className="flex items-center gap-2">
-            <span className="w-2 h-2 rounded-full bg-red-500 animate-pulse flex-shrink-0" />
+            <ChannelLogo icon={item.icon} />
             <span className="truncate">{item.name}</span>
           </div>
         </button>
