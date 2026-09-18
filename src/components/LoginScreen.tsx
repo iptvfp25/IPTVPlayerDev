@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import { Eye, EyeOff, Link, Loader2, LogIn, Server, Tv } from "lucide-react";
 import { XtreamClient } from "@/lib/xtream";
+import { preloadBrowseData } from "@/components/NetflixBrowse";
 import type { UserInfo } from "@/types/xtream";
 
 interface LoginScreenProps {
@@ -8,7 +9,7 @@ interface LoginScreenProps {
 }
 
 const STORAGE_KEY = "xtream-credentials";
-const PRELOAD_ITEMS_PER_TYPE = 40;
+const PRELOAD_LIVE_ITEMS = 40;
 const PRELOAD_TIMEOUT_MS = 6000;
 
 type LoginMode = "credentials" | "url";
@@ -137,17 +138,24 @@ export default function LoginScreen({ onLogin }: LoginScreenProps) {
 
         setStage("preloading");
         try {
-          const [liveStreams, vodStreams, series] = await Promise.all([
-            client.getLiveStreams().catch(() => []),
-            client.getVodStreams().catch(() => []),
-            client.getSeries().catch(() => []),
+          // Kick off Movies/Series category+poster loading now (populates
+          // the shared cache in NetflixBrowse), so switching to those tabs
+          // for the first time doesn't show a full loading spinner. These
+          // keep running in the background even after the timeout below,
+          // since they're backed by a shared, de-duplicated promise.
+          const vodPreload = preloadBrowseData(client, "vod").catch(() => {});
+          const seriesPreload = preloadBrowseData(client, "series").catch(() => {});
+
+          const liveStreams = await client.getLiveStreams().catch(() => []);
+          const liveImageUrls = liveStreams
+            .slice(0, PRELOAD_LIVE_ITEMS)
+            .map(extractImageUrl)
+            .filter((u): u is string => !!u);
+
+          await Promise.race([
+            Promise.all([preloadImages(liveImageUrls, PRELOAD_TIMEOUT_MS), vodPreload, seriesPreload]),
+            new Promise<void>((resolve) => setTimeout(resolve, PRELOAD_TIMEOUT_MS)),
           ]);
-          const urls = [
-            ...liveStreams.slice(0, PRELOAD_ITEMS_PER_TYPE).map(extractImageUrl),
-            ...vodStreams.slice(0, PRELOAD_ITEMS_PER_TYPE).map(extractImageUrl),
-            ...series.slice(0, PRELOAD_ITEMS_PER_TYPE).map(extractImageUrl),
-          ].filter((u): u is string => !!u);
-          await preloadImages(urls, PRELOAD_TIMEOUT_MS);
         } catch {
           // Preloading is a nice-to-have; never block login on it failing.
         }
