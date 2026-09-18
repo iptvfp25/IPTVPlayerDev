@@ -12,7 +12,7 @@
     "typecheck": "tsc --noEmit -p tsconfig.app.json",
     "electron:dev": "concurrently -k \"vite\" \"wait-on http://localhost:5173 && electron .\"",
     "electron:build": "vite build && electron-builder",
-    "electron:build:win": "vite build && electron-builder --win",
+    "electron:build:win": "vite build && electron-builder --win portable",
     "electron:build:mac": "vite build && electron-builder --mac",
     "electron:build:linux": "vite build && electron-builder --linux"
   },
@@ -24,8 +24,7 @@
     },
     "files": ["dist/**/*", "electron/**/*"],
     "win": {
-      "target": "nsis",
-      "icon": "public/icon.png"
+      "target": "portable"
     },
     "mac": {
       "target": "dmg",
