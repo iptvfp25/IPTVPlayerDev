@@ -58,6 +58,26 @@ function notifyBrowseUpdate(contentType: "vod" | "series", rows: CategoryRow[]) 
   browseListeners[contentType].forEach((listener) => listener(rows));
 }
 
+// Global switch that lets MainScreen tell every mounted browse row "stop
+// starting new background fetches/image preloads right now" the instant
+// the user picks something to play. Background category loading and poster
+// preloading otherwise compete for the same limited browser connections as
+// the video stream itself, which is what made playback noticeably slower
+// to start while scrolling had triggered several categories to load at
+// once. Resuming just lets any rows still on screen pick up where they
+// left off -- nothing already loaded is lost.
+let backgroundLoadingPaused = false;
+const resumeListeners = new Set<() => void>();
+
+export function pauseBackgroundLoading() {
+  backgroundLoadingPaused = true;
+}
+
+export function resumeBackgroundLoading() {
+  backgroundLoadingPaused = false;
+  resumeListeners.forEach((fn) => fn());
+}
+
 function toBrowseItem(raw: any, contentType: "vod" | "series"): BrowseItem {
   return contentType === "vod"
     ? {
@@ -83,13 +103,7 @@ function toBrowseItem(raw: any, contentType: "vod" | "series"): BrowseItem {
 // Only fetches the category LIST (a small, fast request), never the full
 // catalog. Each category's actual items are fetched lazily, one category
 // at a time, only when that row scrolls into view (see loadCategoryItems
-// below). This replaced an earlier "fetch everything in one request"
-// approach that pulled the entire VOD/series catalog as a single JSON
-// response -- on this Xtream panel that single request measured 2.7MB and
-// took ~18 seconds in DevTools, which is exactly the kind of unfiltered,
-// whole-catalog query that's slow server-side regardless of how the client
-// batches it. Fetching only what's visible keeps every individual request
-// small and fast instead of waiting on one huge one.
+// below).
 export function preloadBrowseData(client: XtreamClient, contentType: "vod" | "series"): Promise<void> {
   if (browseCache[contentType] && browseCache[contentType].length > 0) {
     return Promise.resolve();
@@ -123,6 +137,8 @@ async function loadCategoryItems(
   contentType: "vod" | "series",
   categoryId: string
 ) {
+  if (backgroundLoadingPaused) return;
+
   const cacheKey = `${contentType}:${categoryId}`;
   if (categoryFetchInFlight.has(cacheKey)) return;
 
@@ -141,17 +157,16 @@ async function loadCategoryItems(
       contentType === "vod" ? await client.getVodStreams(categoryId) : await client.getSeries(categoryId);
     const items = raw.map((r: any) => toBrowseItem(r, contentType));
 
-    // This category's items just arrived -- kick off image loads for its
-    // posters right away instead of waiting for lazy <img loading="lazy">
-    // to notice they've scrolled into view. Scoped to a single category
-    // (tens of items, not the whole catalog), so it doesn't reintroduce
-    // the connection-saturation problem that a catalog-wide preload caused.
-    // By the time the user's scroll reaches this row, the browser likely
-    // already has these images cached.
-    for (const item of items) {
-      if (item.poster) {
-        const img = new Image();
-        img.src = item.poster;
+    // Preload this category's posters, but only if nothing is paused for
+    // playback -- if the user selected something to play while this
+    // request was in flight, skip firing off a burst of new image
+    // requests right as the video needs bandwidth.
+    if (!backgroundLoadingPaused) {
+      for (const item of items) {
+        if (item.poster) {
+          const img = new Image();
+          img.src = item.poster;
+        }
       }
     }
 
@@ -303,26 +318,33 @@ const HorizontalRow = memo(function HorizontalRow({
   const rootRef = useRef<HTMLDivElement>(null);
   const [canScrollLeft, setCanScrollLeft] = useState(false);
   const [canScrollRight, setCanScrollRight] = useState(false);
+  const [isNear, setIsNear] = useState(false);
+  const [resumeTick, setResumeTick] = useState(0);
 
-  // Fetch this category's items the first time the row comes near the
-  // viewport (rootMargin gives it a head start before it's actually
-  // visible), instead of fetching every category up front.
   useEffect(() => {
-    if (row.loaded || row.loading) return;
+    if (row.loaded) return;
     const el = rootRef.current;
     if (!el) return;
     const observer = new IntersectionObserver(
-      (entries) => {
-        if (entries[0]?.isIntersecting) {
-          loadCategoryItems(client, contentType, row.category.category_id);
-          observer.disconnect();
-        }
-      },
+      (entries) => setIsNear(entries[0]?.isIntersecting ?? false),
       { rootMargin: "600px 0px" }
     );
     observer.observe(el);
     return () => observer.disconnect();
-  }, [client, contentType, row.category.category_id, row.loaded, row.loading]);
+  }, [row.loaded]);
+
+  useEffect(() => {
+    const listener = () => setResumeTick((t) => t + 1);
+    resumeListeners.add(listener);
+    return () => {
+      resumeListeners.delete(listener);
+    };
+  }, []);
+
+  useEffect(() => {
+    if (!isNear || row.loaded || row.loading) return;
+    loadCategoryItems(client, contentType, row.category.category_id);
+  }, [isNear, row.loaded, row.loading, resumeTick, client, contentType, row.category.category_id]);
 
   const checkScroll = useCallback(() => {
     const el = scrollRef.current;

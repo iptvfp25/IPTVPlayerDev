@@ -1,4 +1,4 @@
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import {
   Clapperboard,
   Download,
@@ -21,7 +21,7 @@ import VideoPlayer from "@/components/VideoPlayer";
 import Sidebar, { type SidebarLevel, type SidebarItem } from "@/components/Sidebar";
 import TVGuide from "@/components/TVGuide";
 import SeriesDetailModal from "@/components/SeriesDetailModal";
-import NetflixBrowse, { type BrowseItem } from "@/components/NetflixBrowse";
+import NetflixBrowse, { type BrowseItem, pauseBackgroundLoading, resumeBackgroundLoading } from "@/components/NetflixBrowse";
 import SearchTab from "@/components/SearchTab";
 import FavoritesTab from "@/components/FavoritesTab";
 import DownloadsTab from "@/components/DownloadsTab";
@@ -47,6 +47,8 @@ const liveCache: { categories: Category[] | null; allStreams: SidebarItem[] | nu
   categories: null,
   allStreams: null,
 };
+
+const PLAYBACK_PRIORITY_MS = 6000;
 
 export default function MainScreen({ client, userInfo, session, onLogout }: MainScreenProps) {
   const [activeTab, setActiveTab] = useState<AppTab>("live");
@@ -85,6 +87,23 @@ export default function MainScreen({ client, userInfo, session, onLogout }: Main
 
   const [allLiveStreams, setAllLiveStreams] = useState<SidebarItem[]>(liveCache.allStreams || []);
   const { favKeys, toggle: toggleFav, entries: favEntries } = useFavorites();
+
+  const resumeTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+
+  const prioritizePlayback = () => {
+    pauseBackgroundLoading();
+    if (resumeTimerRef.current) clearTimeout(resumeTimerRef.current);
+    resumeTimerRef.current = setTimeout(() => {
+      resumeBackgroundLoading();
+    }, PLAYBACK_PRIORITY_MS);
+  };
+
+  useEffect(() => {
+    return () => {
+      if (resumeTimerRef.current) clearTimeout(resumeTimerRef.current);
+      resumeBackgroundLoading();
+    };
+  }, []);
 
   useEffect(() => {
     if (activeTab !== "live") return;
@@ -159,6 +178,7 @@ export default function MainScreen({ client, userInfo, session, onLogout }: Main
   };
 
   const handleLiveItemClick = (item: SidebarItem) => {
+    prioritizePlayback();
     setSelectedItem(item.id);
     const streamId = Number(item.id);
     const url = client.getLiveUrl(streamId);
@@ -166,6 +186,7 @@ export default function MainScreen({ client, userInfo, session, onLogout }: Main
   };
 
   const playLive = (streamId: number, name: string) => {
+    prioritizePlayback();
     const url = client.getLiveUrl(streamId);
     setPlayback({ url, title: name, isLive: true, streamId });
     setOverlayPlayback(null);
@@ -173,6 +194,7 @@ export default function MainScreen({ client, userInfo, session, onLogout }: Main
   };
 
   const playVod = (streamId: number, ext: string, name: string) => {
+    prioritizePlayback();
     const url = client.getVodUrl(streamId, ext);
     setOverlayPlayback({ url, title: name, isLive: false });
   };
@@ -197,6 +219,7 @@ export default function MainScreen({ client, userInfo, session, onLogout }: Main
       alert("Could not determine episode ID. Please try another episode.");
       return;
     }
+    prioritizePlayback();
     const url = client.getEpisodeUrl(episode.episode_id, episode.container_extension);
     setOverlayPlayback({ url, title: `${seriesName} - ${episode.title}`, isLive: false });
   };
@@ -270,6 +293,16 @@ export default function MainScreen({ client, userInfo, session, onLogout }: Main
 
   return (
     <div className="h-screen bg-[#0d0f14] flex flex-col overflow-hidden">
+      <style>{`
+        @keyframes tabFadeSlideIn {
+          from { opacity: 0; transform: translateY(14px) scale(0.985); }
+          to { opacity: 1; transform: translateY(0) scale(1); }
+        }
+        .tab-transition {
+          animation: tabFadeSlideIn 320ms cubic-bezier(0.22, 1, 0.36, 1);
+        }
+      `}</style>
+
       <header className="flex-shrink-0 h-14 bg-[#141822] border-b border-white/5 flex items-center justify-between px-6 z-30">
         <div className="flex items-center gap-3">
           <div
@@ -322,7 +355,7 @@ export default function MainScreen({ client, userInfo, session, onLogout }: Main
         </div>
       </header>
 
-      <div className="flex-1 flex overflow-hidden">
+      <div key={activeTab} className="flex-1 flex overflow-hidden tab-transition">
         {activeTab === "live" && (
           <>
             <div className="flex-1 flex flex-col p-6 overflow-y-auto sidebar-scroll min-w-0">
@@ -447,14 +480,17 @@ export default function MainScreen({ client, userInfo, session, onLogout }: Main
 
       {/* Overlay player for VOD / Episodes */}
       {overlayPlayback && (
-        <div className="fixed inset-0 bg-black/90 z-50 flex flex-col items-center justify-center p-4">
+        <div className="fixed inset-0 bg-black/90 z-50 flex flex-col items-center justify-center p-4 tab-transition">
           <div className="w-full max-w-5xl">
             <div className="flex items-center justify-between mb-4">
               <h3 className="text-white font-semibold text-lg truncate pr-4">
                 {overlayPlayback.title}
               </h3>
               <button
-                onClick={() => setOverlayPlayback(null)}
+                onClick={() => {
+                  setOverlayPlayback(null);
+                  resumeBackgroundLoading();
+                }}
                 className="text-gray-400 hover:text-white transition-colors p-2 rounded-lg hover:bg-white/10"
               >
                 <X className="w-5 h-5" />
