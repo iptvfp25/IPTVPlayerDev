@@ -49,8 +49,6 @@ function formatTime(seconds: number): string {
 }
 
 const MAX_CONSECUTIVE_ERRORS = 5;
-const PRELOAD_SECONDS = 10;
-const PRELOAD_TIMEOUT_MS = 12000;
 
 export default function VideoPlayer({
   url,
@@ -67,8 +65,6 @@ export default function VideoPlayer({
   const hideTimer = useRef<ReturnType<typeof setTimeout>>();
   const clickTimer = useRef<ReturnType<typeof setTimeout>>();
   const errorCountRef = useRef(0);
-  const startedRef = useRef(false);
-  const preloadTimeoutRef = useRef<ReturnType<typeof setTimeout>>();
 
   const [playing, setPlaying] = useState(false);
   const [muted, setMuted] = useState(false);
@@ -105,44 +101,18 @@ export default function VideoPlayer({
     setBuffering(true);
     setPlaying(false);
     errorCountRef.current = 0;
-    startedRef.current = false;
-    clearTimeout(preloadTimeoutRef.current);
     video.removeAttribute("src");
     video.load();
 
     const type = detectStreamType(url);
 
-    const startWhenBuffered = () => {
-      if (startedRef.current) return;
-      if (isLive) {
-        startedRef.current = true;
-        video.play().catch(() => {});
-        return;
-      }
-      const ranges = video.buffered;
-      let bufferedAhead = 0;
-      for (let i = 0; i < ranges.length; i++) {
-        if (ranges.start(i) <= video.currentTime && ranges.end(i) > video.currentTime) {
-          bufferedAhead = ranges.end(i) - video.currentTime;
-          break;
-        }
-      }
-      if (bufferedAhead >= PRELOAD_SECONDS || (video.duration && bufferedAhead >= video.duration)) {
-        startedRef.current = true;
-        clearTimeout(preloadTimeoutRef.current);
-        video.play().catch(() => {});
-      }
-    };
-
-    video.addEventListener("progress", startWhenBuffered);
-    video.addEventListener("loadeddata", startWhenBuffered);
-    preloadTimeoutRef.current = setTimeout(() => {
-      if (!startedRef.current) {
-        startedRef.current = true;
-        video.play().catch(() => {});
-      }
-    }, PRELOAD_TIMEOUT_MS);
-
+    // Playback starts as soon as the browser has enough data (native
+    // "waiting"/"playing" events already show a buffering spinner in the
+    // meantime -- see the buffering state above). We intentionally do NOT
+    // delay the play() call to wait for a fixed amount of buffer: browsers
+    // only allow autoplay within a short window after the user's click
+    // gesture, and delaying play() by several seconds causes it to be
+    // silently rejected, requiring a second manual click to start.
     try {
       if (type === "hls") {
         if (Hls.isSupported()) {
@@ -157,9 +127,12 @@ export default function VideoPlayer({
           });
           hls.loadSource(url);
           hls.attachMedia(video);
+          hls.on(Hls.Events.MANIFEST_PARSED, () => {
+            errorCountRef.current = 0;
+            video.play().catch(() => {});
+          });
           hls.on(Hls.Events.FRAG_LOADED, () => {
             errorCountRef.current = 0;
-            startWhenBuffered();
           });
           hls.on(Hls.Events.ERROR, (_e, data) => {
             if (!data.fatal) return;
@@ -187,6 +160,7 @@ export default function VideoPlayer({
           hlsRef.current = hls;
         } else if (video.canPlayType("application/vnd.apple.mpegurl")) {
           video.src = url;
+          video.play().catch(() => {});
         } else {
           setError("HLS playback is not supported in this environment.");
         }
@@ -207,9 +181,7 @@ export default function VideoPlayer({
           );
           player.attachMediaElement(video);
           player.load();
-          if (isLive) {
-            player.play();
-          }
+          player.play();
           player.on(mpegts.Events.ERROR, () => {
             errorCountRef.current += 1;
             if (errorCountRef.current >= MAX_CONSECUTIVE_ERRORS) {
@@ -225,15 +197,13 @@ export default function VideoPlayer({
         }
       } else {
         video.src = url;
+        video.play().catch(() => {});
       }
     } catch (e) {
       setError(e instanceof Error ? e.message : "Failed to initialize player");
     }
 
     return () => {
-      clearTimeout(preloadTimeoutRef.current);
-      video.removeEventListener("progress", startWhenBuffered);
-      video.removeEventListener("loadeddata", startWhenBuffered);
       destroyPlayers();
     };
   }, [url, isLive, destroyPlayers]);
