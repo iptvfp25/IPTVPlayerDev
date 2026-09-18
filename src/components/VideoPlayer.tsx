@@ -50,16 +50,20 @@ function formatTime(seconds: number): string {
 
 const MAX_CONSECUTIVE_ERRORS = 5;
 
-// Many Xtream panels serve VOD/episode files that are actually raw
-// MPEG-TS streams even though the URL ends in .mp4/.mkv (they just pass
-// through whatever container the source recording used). A native
-// <video> element can't demux MPEG-TS, so it sits there waiting for data
-// it will never understand -- that's what caused movies/episodes to take
-// a long time (or never) to start even though the network request itself
-// was fine. If native playback hasn't produced any real progress within
-// this window, we transparently fall back to the mpegts.js demuxer on the
-// exact same URL, the same way live channels already do.
-const NATIVE_STARTUP_TIMEOUT_MS = 3500;
+// Some Xtream panels serve VOD/episode files that are actually raw MPEG-TS
+// even though the URL ends in .mp4/.mkv. A native <video> element can't
+// demux MPEG-TS, so it never even reaches HAVE_METADATA (readyState stays
+// at 0) no matter how long you wait -- that's the real signature of a
+// disguised MPEG-TS file, NOT "it's just slow to buffer". A genuine
+// mp4/mkv typically reaches HAVE_METADATA within a second or two even on a
+// slow connection, because only the small moov/header atom needs to
+// download before metadata is known; the rest can keep buffering slowly
+// afterwards. So we only fall back to the mpegts.js demuxer if metadata
+// has genuinely never loaded by the deadline -- a real-but-slow file that
+// already has metadata is left alone and allowed to keep buffering,
+// instead of being aborted and restarted (which previously made slow
+// streams even slower).
+const NATIVE_STARTUP_TIMEOUT_MS = 9000;
 
 export default function VideoPlayer({
   url,
@@ -77,7 +81,7 @@ export default function VideoPlayer({
   const clickTimer = useRef<ReturnType<typeof setTimeout>>();
   const errorCountRef = useRef(0);
   const nativeFallbackTimer = useRef<ReturnType<typeof setTimeout>>();
-  const nativeStartedRef = useRef(false);
+  const metadataLoadedRef = useRef(false);
 
   const [playing, setPlaying] = useState(false);
   const [muted, setMuted] = useState(false);
@@ -156,7 +160,7 @@ export default function VideoPlayer({
     setBuffering(true);
     setPlaying(false);
     errorCountRef.current = 0;
-    nativeStartedRef.current = false;
+    metadataLoadedRef.current = false;
     video.removeAttribute("src");
     video.load();
 
@@ -224,15 +228,16 @@ export default function VideoPlayer({
         startMpegts(video, url);
       } else {
         // "native" -- but if this turns out to actually be MPEG-TS wearing
-        // an .mp4/.mkv extension, the video element will never fire
-        // "playing" or advance currentTime. Arm a fallback timer that
-        // switches to the mpegts.js demuxer if nothing has genuinely
-        // started by the deadline.
+        // an .mp4/.mkv extension, the video element will never reach
+        // HAVE_METADATA. Arm a fallback timer that switches to the
+        // mpegts.js demuxer, but only if metadata genuinely never loaded
+        // by the deadline -- a real file that's just slow to buffer
+        // already has metadata and is left completely alone.
         video.src = url;
         video.play().catch(() => {});
 
         nativeFallbackTimer.current = setTimeout(() => {
-          if (!nativeStartedRef.current && videoRef.current) {
+          if (!metadataLoadedRef.current && videoRef.current && videoRef.current.readyState === 0) {
             startMpegts(videoRef.current, url);
           }
         }, NATIVE_STARTUP_TIMEOUT_MS);
@@ -264,29 +269,23 @@ export default function VideoPlayer({
 
     const onPlay = () => setPlaying(true);
     const onPause = () => setPlaying(false);
-    const onTime = () => {
-      // Real playback progress -- cancel the MPEG-TS-in-disguise fallback
-      // timer, since native decoding is clearly working.
-      if (video.currentTime > 0) {
-        nativeStartedRef.current = true;
-        if (nativeFallbackTimer.current) {
-          clearTimeout(nativeFallbackTimer.current);
-          nativeFallbackTimer.current = undefined;
-        }
-      }
-      setCurrentTime(video.currentTime);
-      setDuration(video.duration || 0);
-      onTimeUpdate?.(video.currentTime, video.duration || 0);
-    };
-    const onWaiting = () => setBuffering(true);
-    const onPlaying = () => {
-      setBuffering(false);
-      nativeStartedRef.current = true;
+    const onLoadedMetadata = () => {
+      // Metadata loading proves the browser can actually parse this
+      // container -- cancel the MPEG-TS-in-disguise fallback timer even
+      // if the file is still slowly buffering and hasn't started playing.
+      metadataLoadedRef.current = true;
       if (nativeFallbackTimer.current) {
         clearTimeout(nativeFallbackTimer.current);
         nativeFallbackTimer.current = undefined;
       }
     };
+    const onTime = () => {
+      setCurrentTime(video.currentTime);
+      setDuration(video.duration || 0);
+      onTimeUpdate?.(video.currentTime, video.duration || 0);
+    };
+    const onWaiting = () => setBuffering(true);
+    const onPlaying = () => setBuffering(false);
     const onCanPlay = () => setBuffering(false);
     const onError = () => {
       if (video.error) setError("Playback failed. The stream may be unavailable.");
@@ -294,6 +293,7 @@ export default function VideoPlayer({
 
     video.addEventListener("play", onPlay);
     video.addEventListener("pause", onPause);
+    video.addEventListener("loadedmetadata", onLoadedMetadata);
     video.addEventListener("timeupdate", onTime);
     video.addEventListener("waiting", onWaiting);
     video.addEventListener("playing", onPlaying);
@@ -303,6 +303,7 @@ export default function VideoPlayer({
     return () => {
       video.removeEventListener("play", onPlay);
       video.removeEventListener("pause", onPause);
+      video.removeEventListener("loadedmetadata", onLoadedMetadata);
       video.removeEventListener("timeupdate", onTime);
       video.removeEventListener("waiting", onWaiting);
       video.removeEventListener("playing", onPlaying);
