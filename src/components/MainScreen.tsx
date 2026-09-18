@@ -197,6 +197,12 @@ export default function MainScreen({ client, userInfo, session, onLogout }: Main
     setError("");
   };
 
+  const handleShowFavorites = () => {
+    setLevel("favorites");
+    setSelectedCategory(null);
+    setError("");
+  };
+
   const handleBrowseFavToggle = (item: BrowseItem, type?: ContentType) => {
     const ct = type || (activeTab === "vod" ? "vod" : activeTab === "series" ? "series" : "live");
     toggleFav(item, ct as ContentType);
@@ -366,6 +372,7 @@ export default function MainScreen({ client, userInfo, session, onLogout }: Main
               allStreams={allLiveStreams}
               favorites={favKeys}
               onToggleFavorite={handleLiveFavToggle}
+              onShowFavorites={handleShowFavorites}
             />
           </>
         )}
