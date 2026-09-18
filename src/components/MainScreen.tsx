@@ -99,14 +99,6 @@ export default function MainScreen({ client, userInfo, session, onLogout }: Main
   const { favKeys, toggle: toggleFav, entries: favEntries } = useFavorites();
 
   const liveResumeTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
-  // Whether we're currently holding background loading paused for an open
-  // VOD/episode overlay -- unlike live playback, this has no fixed timer:
-  // it stays paused for as long as the movie/episode is open, since a
-  // whole file needs to buffer, not just a live edge to connect. Resuming
-  // it early (as a fixed short timer previously did) meant NetflixBrowse's
-  // thumbnail/list fetching came back online and competed for bandwidth
-  // right in the middle of the movie still trying to load -- a real
-  // regression versus not having background tabs mounted at all.
   const vodPausedRef = useRef(false);
 
   const prioritizeLivePlayback = () => {
@@ -150,9 +142,6 @@ export default function MainScreen({ client, userInfo, session, onLogout }: Main
     };
   }, []);
 
-  // Live categories/channels are always loaded once and cached at module
-  // level (liveCache), regardless of which tab is currently visible --
-  // this effect runs unconditionally now that every tab stays mounted.
   useEffect(() => {
     setError("");
 
@@ -182,23 +171,18 @@ export default function MainScreen({ client, userInfo, session, onLogout }: Main
             id: String(s.stream_id),
             name: s.name,
             categoryId: s.category_id,
+            icon: s.stream_icon,
           }));
           liveCache.allStreams = mapped;
           setAllLiveStreams(mapped);
         })
         .catch(() => {});
     }
-    // Runs once on mount -- this tab's data is loaded regardless of
-    // whether "live" is the active tab, since it's always mounted now.
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [client]);
 
   const handleTabSwitch = (tab: AppTab) => {
     if (tab === activeTab) return;
-    // Leaving the Live tab must actually stop the channel, not just hide
-    // it -- every tab stays mounted for the crossfade, so without this the
-    // live stream (and its network connection) would keep running silently
-    // behind whichever tab you switched to.
     if (activeTab === "live" && playback) {
       setPlayback(null);
       if (liveResumeTimerRef.current) {
@@ -231,6 +215,7 @@ export default function MainScreen({ client, userInfo, session, onLogout }: Main
           id: String(s.stream_id),
           name: s.name,
           categoryId: s.category_id,
+          icon: s.stream_icon,
         }))
       );
     } catch (e) {
@@ -258,11 +243,6 @@ export default function MainScreen({ client, userInfo, session, onLogout }: Main
   };
 
   const playVod = (streamId: number, ext: string, name: string) => {
-    // Many Xtream providers allow only one active connection per account.
-    // If a live channel is still connected in the background, it competes
-    // with the movie for that single connection slot -- stopping it here
-    // is what actually fixed movies being slow to start, not just a
-    // bandwidth-sharing nicety.
     stopLivePlayback();
     prioritizeVodPlayback();
     const url = client.getVodUrl(streamId, ext);
@@ -362,10 +342,6 @@ export default function MainScreen({ client, userInfo, session, onLogout }: Main
     { key: "downloads", label: t(lang, "downloads"), icon: Download },
   ];
 
-  // Every tab is rendered simultaneously and kept mounted at all times --
-  // switching only fades/slides between them via opacity + transform, so
-  // NetflixBrowse's IntersectionObservers, scroll positions, and loaded
-  // category data are never torn down and rebuilt.
   const renderTabContent = (tab: AppTab) => {
     switch (tab) {
       case "live":
@@ -573,13 +549,6 @@ export default function MainScreen({ client, userInfo, session, onLogout }: Main
           const activeIdx = TAB_ORDER.indexOf(activeTab);
           const idx = TAB_ORDER.indexOf(key);
           const isActive = key === activeTab;
-          // Each pane's resting position is tied to its own place in the
-          // nav relative to whichever tab is active: panes to the left of
-          // the active tab always rest slightly off-screen to the left,
-          // panes to the right rest to the right. That's what makes the
-          // motion coherent with the nav order in both directions -- no
-          // separate "forward/backward" direction state is needed, since
-          // every pane already knows which side it belongs on.
           const dir = idx === activeIdx ? 0 : idx < activeIdx ? -1 : 1;
           const x = dir * 56;
           return (
@@ -600,7 +569,6 @@ export default function MainScreen({ client, userInfo, session, onLogout }: Main
         })}
       </div>
 
-      {/* Overlay player for VOD / Episodes */}
       {overlayPlayback && (
         <div
           className="fixed inset-0 bg-black/90 z-50 flex flex-col items-center justify-center p-4"
