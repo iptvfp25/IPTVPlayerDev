@@ -11,10 +11,7 @@
     "preview": "vite preview",
     "typecheck": "tsc --noEmit -p tsconfig.app.json",
     "electron:dev": "concurrently -k \"vite\" \"wait-on http://localhost:5173 && electron .\"",
-    "electron:build": "vite build && electron-builder",
-    "electron:build:win": "vite build && electron-builder --win portable",
-    "electron:build:mac": "vite build && electron-builder --mac",
-    "electron:build:linux": "vite build && electron-builder --linux"
+    "electron:build": "vite build && electron-builder --win"
   },
   "build": {
     "appId": "com.iptv.desktop",
@@ -24,15 +21,7 @@
     },
     "files": ["dist/**/*", "electron/**/*"],
     "win": {
-      "target": "portable"
-    },
-    "mac": {
-      "target": "dmg",
-      "icon": "public/icon.png"
-    },
-    "linux": {
-      "target": "AppImage",
-      "icon": "public/icon.png"
+      "target": ["portable", "nsis"]
     }
   },
   "dependencies": {
