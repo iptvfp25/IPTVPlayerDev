@@ -50,9 +50,8 @@ const liveCache: { categories: Category[] | null; allStreams: SidebarItem[] | nu
 
 const PLAYBACK_PRIORITY_MS = 6000;
 
-// Order of tabs in the nav, used to figure out whether a switch is moving
-// "forward" or "backward" so the slide direction matches the direction the
-// user is navigating instead of always sliding the same way.
+// Order of tabs in the nav, used only to bias the slide direction of the
+// crossfade below (does not affect which tabs stay mounted).
 const TAB_ORDER: AppTab[] = ["live", "vod", "series", "search", "favorites", "downloads"];
 
 export default function MainScreen({ client, userInfo, session, onLogout }: MainScreenProps) {
@@ -111,8 +110,10 @@ export default function MainScreen({ client, userInfo, session, onLogout }: Main
     };
   }, []);
 
+  // Live categories/channels are always loaded once and cached at module
+  // level (liveCache), regardless of which tab is currently visible --
+  // this effect runs unconditionally now that every tab stays mounted.
   useEffect(() => {
-    if (activeTab !== "live") return;
     setError("");
 
     if (liveCache.categories) {
@@ -147,7 +148,10 @@ export default function MainScreen({ client, userInfo, session, onLogout }: Main
         })
         .catch(() => {});
     }
-  }, [client, activeTab]);
+    // Runs once on mount -- this tab's data is loaded regardless of
+    // whether "live" is the active tab, since it's always mounted now.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [client]);
 
   const handleTabSwitch = (tab: AppTab) => {
     if (tab === activeTab) return;
@@ -300,111 +304,17 @@ export default function MainScreen({ client, userInfo, session, onLogout }: Main
     { key: "downloads", label: t(lang, "downloads"), icon: Download },
   ];
 
-  return (
-    <div className="h-screen bg-[#0d0f14] flex flex-col overflow-hidden">
-      <style>{`
-        @keyframes tabSlideInForward {
-          0%   { opacity: 0; transform: translateX(70px) scale(0.94); filter: blur(10px); }
-          55%  { opacity: 1; }
-          100% { opacity: 1; transform: translateX(0) scale(1); filter: blur(0); }
-        }
-        @keyframes tabSlideInBackward {
-          0%   { opacity: 0; transform: translateX(-70px) scale(0.94); filter: blur(10px); }
-          55%  { opacity: 1; }
-          100% { opacity: 1; transform: translateX(0) scale(1); filter: blur(0); }
-        }
-        @keyframes accentWipe {
-          0%   { transform: scaleX(0); opacity: 0.9; }
-          60%  { transform: scaleX(1); opacity: 0.6; }
-          100% { transform: scaleX(1); opacity: 0; }
-        }
-        .tab-transition-forward {
-          animation: tabSlideInForward 480ms cubic-bezier(0.16, 1.15, 0.35, 1);
-          will-change: transform, opacity, filter;
-        }
-        .tab-transition-backward {
-          animation: tabSlideInBackward 480ms cubic-bezier(0.16, 1.15, 0.35, 1);
-          will-change: transform, opacity, filter;
-        }
-        .tab-accent-wipe {
-          position: absolute;
-          top: 0;
-          left: 0;
-          right: 0;
-          height: 3px;
-          transform-origin: left;
-          animation: accentWipe 480ms ease-out;
-          pointer-events: none;
-        }
-      `}</style>
-
-      <header className="flex-shrink-0 h-14 bg-[#141822] border-b border-white/5 flex items-center justify-between px-6 z-30">
-        <div className="flex items-center gap-3">
-          <div
-            className="w-8 h-8 rounded-lg flex items-center justify-center shadow-lg"
-            style={{ background: `linear-gradient(135deg, ${accent.primary}, ${accent.dark})`, boxShadow: `0 4px 14px ${accent.shadow}33` }}
-          >
-            <Tv className="w-4 h-4 text-white" strokeWidth={2.5} />
-          </div>
-          <span className="text-white font-bold text-sm tracking-tight">
-            IPTV<span style={{ color: accent.primary }}>.</span>
-          </span>
-        </div>
-
-        <nav className="flex items-center gap-1">
-          {tabConfig.map(({ key, label, icon: Icon }) => (
-            <button
-              key={key}
-              onClick={() => handleTabSwitch(key)}
-              className={`flex items-center gap-2 px-4 py-1.5 rounded-lg text-sm font-medium transition-all ${
-                activeTab === key
-                  ? "text-white shadow-lg"
-                  : "text-gray-500 hover:text-gray-300 hover:bg-white/5"
-              }`}
-              style={activeTab === key ? { backgroundColor: accent.primary, boxShadow: `0 4px 14px ${accent.shadow}33` } : undefined}
-            >
-              <Icon className="w-4 h-4" />
-              <span className="hidden sm:inline">{label}</span>
-            </button>
-          ))}
-        </nav>
-
-        <div className="flex items-center gap-1">
-          <button
-            onClick={() => setShowSettings(true)}
-            className="flex items-center gap-2 text-gray-500 hover:text-white text-xs transition-colors px-2 py-1.5 rounded-lg hover:bg-white/5"
-            title={t(lang, "settings")}
-          >
-            <Settings className="w-3.5 h-3.5" />
-          </button>
-          <button
-            onClick={onLogout}
-            className="flex items-center gap-2 text-gray-500 hover:text-white text-xs transition-colors px-2 py-1.5 rounded-lg hover:bg-white/5"
-          >
-            <LogOut className="w-3.5 h-3.5" />
-            <span className="hidden sm:inline">{t(lang, "logout")}</span>
-          </button>
-          {session && (
-            <div className="w-1.5 h-1.5 rounded-full bg-emerald-400 ml-1" title={t(lang, "syncEnabled")} />
-          )}
-        </div>
-      </header>
-
-      <div className="relative flex-shrink-0">
-        <div
-          key={`wipe-${activeTab}`}
-          className="tab-accent-wipe"
-          style={{ backgroundColor: accent.primary }}
-        />
-      </div>
-
-      <div
-        key={activeTab}
-        className={`flex-1 flex overflow-hidden ${
-          slideDir === "forward" ? "tab-transition-forward" : "tab-transition-backward"
-        }`}
-      >
-        {activeTab === "live" && (
+  // Every tab is rendered simultaneously and kept mounted at all times --
+  // switching only fades/slides between them via opacity + transform, so
+  // NetflixBrowse's IntersectionObservers, scroll positions, and loaded
+  // category data are never torn down and rebuilt. That's what removed
+  // the "page reloads every time you switch tabs" flash: there is no
+  // remount happening anymore, just a CSS crossfade between panes that
+  // were already sitting in the DOM.
+  const renderTabContent = (tab: AppTab) => {
+    switch (tab) {
+      case "live":
+        return (
           <>
             <div className="flex-1 flex flex-col p-6 overflow-y-auto sidebar-scroll min-w-0">
               <div className="mb-4">
@@ -467,9 +377,10 @@ export default function MainScreen({ client, userInfo, session, onLogout }: Main
               onShowFavorites={handleShowFavorites}
             />
           </>
-        )}
+        );
 
-        {activeTab === "vod" && (
+      case "vod":
+        return (
           <div className="flex-1 overflow-y-auto sidebar-scroll">
             <NetflixBrowse
               client={client}
@@ -480,9 +391,10 @@ export default function MainScreen({ client, userInfo, session, onLogout }: Main
               accentColor={accent.primary}
             />
           </div>
-        )}
+        );
 
-        {activeTab === "series" && (
+      case "series":
+        return (
           <div className="flex-1 overflow-y-auto sidebar-scroll">
             <NetflixBrowse
               client={client}
@@ -493,9 +405,10 @@ export default function MainScreen({ client, userInfo, session, onLogout }: Main
               accentColor={accent.primary}
             />
           </div>
-        )}
+        );
 
-        {activeTab === "search" && (
+      case "search":
+        return (
           <SearchTab
             client={client}
             onPlayLive={playLive}
@@ -506,9 +419,10 @@ export default function MainScreen({ client, userInfo, session, onLogout }: Main
             accentColor={accent.primary}
             lang={lang}
           />
-        )}
+        );
 
-        {activeTab === "favorites" && (
+      case "favorites":
+        return (
           <FavoritesTab
             entries={favEntries}
             onPlay={handleFavPlay}
@@ -516,19 +430,103 @@ export default function MainScreen({ client, userInfo, session, onLogout }: Main
             accentColor={accent.primary}
             lang={lang}
           />
-        )}
+        );
 
-        {activeTab === "downloads" && (
-          <DownloadsTab
-            accentColor={accent.primary}
-            lang={lang}
-          />
-        )}
+      case "downloads":
+        return <DownloadsTab accentColor={accent.primary} lang={lang} />;
+    }
+  };
+
+  return (
+    <div className="h-screen bg-[#0d0f14] flex flex-col overflow-hidden">
+      <header className="flex-shrink-0 h-14 bg-[#141822] border-b border-white/5 flex items-center justify-between px-6 z-30">
+        <div className="flex items-center gap-3">
+          <div
+            className="w-8 h-8 rounded-lg flex items-center justify-center shadow-lg"
+            style={{ background: `linear-gradient(135deg, ${accent.primary}, ${accent.dark})`, boxShadow: `0 4px 14px ${accent.shadow}33` }}
+          >
+            <Tv className="w-4 h-4 text-white" strokeWidth={2.5} />
+          </div>
+          <span className="text-white font-bold text-sm tracking-tight">
+            IPTV<span style={{ color: accent.primary }}>.</span>
+          </span>
+        </div>
+
+        <nav className="flex items-center gap-1">
+          {tabConfig.map(({ key, label, icon: Icon }) => (
+            <button
+              key={key}
+              onClick={() => handleTabSwitch(key)}
+              className={`flex items-center gap-2 px-4 py-1.5 rounded-lg text-sm font-medium transition-all ${
+                activeTab === key
+                  ? "text-white shadow-lg"
+                  : "text-gray-500 hover:text-gray-300 hover:bg-white/5"
+              }`}
+              style={activeTab === key ? { backgroundColor: accent.primary, boxShadow: `0 4px 14px ${accent.shadow}33` } : undefined}
+            >
+              <Icon className="w-4 h-4" />
+              <span className="hidden sm:inline">{label}</span>
+            </button>
+          ))}
+        </nav>
+
+        <div className="flex items-center gap-1">
+          <button
+            onClick={() => setShowSettings(true)}
+            className="flex items-center gap-2 text-gray-500 hover:text-white text-xs transition-colors px-2 py-1.5 rounded-lg hover:bg-white/5"
+            title={t(lang, "settings")}
+          >
+            <Settings className="w-3.5 h-3.5" />
+          </button>
+          <button
+            onClick={onLogout}
+            className="flex items-center gap-2 text-gray-500 hover:text-white text-xs transition-colors px-2 py-1.5 rounded-lg hover:bg-white/5"
+          >
+            <LogOut className="w-3.5 h-3.5" />
+            <span className="hidden sm:inline">{t(lang, "logout")}</span>
+          </button>
+          {session && (
+            <div className="w-1.5 h-1.5 rounded-full bg-emerald-400 ml-1" title={t(lang, "syncEnabled")} />
+          )}
+        </div>
+      </header>
+
+      <div className="relative flex-1 overflow-hidden">
+        {tabConfig.map(({ key }) => {
+          const isActive = key === activeTab;
+          const offset = slideDir === "forward" ? -22 : 22;
+          return (
+            <div
+              key={key}
+              className="absolute inset-0 flex"
+              style={{
+                opacity: isActive ? 1 : 0,
+                transform: `translateX(${isActive ? 0 : offset}px) scale(${isActive ? 1 : 0.982})`,
+                transition: "opacity 420ms cubic-bezier(0.22, 1, 0.36, 1), transform 420ms cubic-bezier(0.22, 1, 0.36, 1)",
+                pointerEvents: isActive ? "auto" : "none",
+                zIndex: isActive ? 10 : 0,
+              }}
+            >
+              {renderTabContent(key)}
+            </div>
+          );
+        })}
       </div>
 
       {/* Overlay player for VOD / Episodes */}
       {overlayPlayback && (
-        <div className="fixed inset-0 bg-black/90 z-50 flex flex-col items-center justify-center p-4 tab-transition-forward">
+        <div
+          className="fixed inset-0 bg-black/90 z-50 flex flex-col items-center justify-center p-4"
+          style={{
+            animation: "overlayFadeIn 380ms cubic-bezier(0.22, 1, 0.36, 1)",
+          }}
+        >
+          <style>{`
+            @keyframes overlayFadeIn {
+              from { opacity: 0; transform: scale(0.97); }
+              to { opacity: 1; transform: scale(1); }
+            }
+          `}</style>
           <div className="w-full max-w-5xl">
             <div className="flex items-center justify-between mb-4">
               <h3 className="text-white font-semibold text-lg truncate pr-4">
