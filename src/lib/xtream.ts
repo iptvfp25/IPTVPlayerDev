@@ -99,51 +99,12 @@ async function apiFetch(server: string, apiPath: string, params: Record<string, 
   throw new Error(lastErr || "Request failed after retries");
 }
 
-// How often to re-warm the connection while the app sits idle (e.g. the
-// user is just browsing the catalog without playing anything). Chosen well
-// under typical NAT/firewall/keep-alive timeouts (usually 60-300s) so the
-// connection to the provider never has a chance to go fully cold again.
-const KEEPALIVE_INTERVAL_MS = 90_000;
-
 export class XtreamClient {
-  private keepAliveTimer: ReturnType<typeof setInterval> | null = null;
-
   constructor(
     public server: string,
     public username: string,
     public password: string,
   ) {}
-
-  // Many Xtream panels are noticeably slower on the very first request from
-  // a given client -- the TCP/TLS handshake has to complete, and some
-  // panels do extra per-IP/session bookkeeping the first time they see a
-  // connection, both of which get skipped on every request after. That's
-  // exactly the "first movie took a minute, the next one took 2 seconds"
-  // pattern: nothing was actually wrong with playback, the connection to
-  // the provider itself just hadn't been established/warmed up yet. We fix
-  // it by firing a harmless HEAD request against the provider as soon as
-  // we're logged in (instead of waiting for the user's first play click to
-  // pay that cost), and then periodically re-warming it so a long idle
-  // browsing session doesn't let the connection go cold again before the
-  // user actually presses play.
-  private warmConnection() {
-    if (!isElectron) return; // the proxy path doesn't benefit from this
-    const target = directServer(this.server);
-    fetch(target, { method: "HEAD", signal: AbortSignal.timeout(15000) }).catch(() => {});
-  }
-
-  private startKeepAlive() {
-    this.warmConnection();
-    if (this.keepAliveTimer) clearInterval(this.keepAliveTimer);
-    this.keepAliveTimer = setInterval(() => this.warmConnection(), KEEPALIVE_INTERVAL_MS);
-  }
-
-  destroy() {
-    if (this.keepAliveTimer) {
-      clearInterval(this.keepAliveTimer);
-      this.keepAliveTimer = null;
-    }
-  }
 
   async login(): Promise<UserInfo> {
     const data = await apiFetch(this.server, "player_api.php", {
@@ -156,7 +117,6 @@ export class XtreamClient {
     if (data.user_info.auth !== 1) {
       throw new Error(`Authentication failed: ${data.user_info.status || "Unknown status"}`);
     }
-    this.startKeepAlive();
     return data.user_info as UserInfo;
   }
 
