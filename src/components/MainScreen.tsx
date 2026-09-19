@@ -50,11 +50,6 @@ const liveCache: { categories: Category[] | null; allStreams: SidebarItem[] | nu
   allStreams: null,
 };
 
-// Live channel playback only needs to win the bandwidth race for a few
-// seconds while the stream connects -- after that it's a steady low
-// bitrate feed, so background loading can safely resume.
-const LIVE_PRIORITY_MS = 6000;
-
 // Order of tabs in the nav, used to place each pane's resting position
 // (left or right of the active tab) so the crossfade always slides in the
 // direction that matches where the destination tab sits in the menu.
@@ -98,22 +93,32 @@ export default function MainScreen({ client, userInfo, session, onLogout }: Main
   const [allLiveStreams, setAllLiveStreams] = useState<SidebarItem[]>(liveCache.allStreams || []);
   const { favKeys, toggle: toggleFav, entries: favEntries } = useFavorites();
 
-  const liveResumeTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const vodPausedRef = useRef(false);
+  const livePausedRef = useRef(false);
 
+  // Live channel playback is the app's core experience, so while a live
+  // channel is on screen it gets every bit of bandwidth/CPU the app can
+  // give it -- background image preloading and category prefetching for
+  // Movies/Series are paused for as long as the user is actually watching
+  // live TV, not just for a brief warm-up window. This is what keeps live
+  // playback smooth instead of competing with unrelated background
+  // fetches for the same connection.
   const prioritizeLivePlayback = () => {
-    pauseBackgroundLoading();
-    if (liveResumeTimerRef.current) clearTimeout(liveResumeTimerRef.current);
-    liveResumeTimerRef.current = setTimeout(() => {
+    if (!livePausedRef.current) {
+      livePausedRef.current = true;
+      pauseBackgroundLoading();
+    }
+  };
+
+  const releaseLivePause = () => {
+    if (livePausedRef.current) {
+      livePausedRef.current = false;
       resumeBackgroundLoading();
-    }, LIVE_PRIORITY_MS);
+    }
   };
 
   const prioritizeVodPlayback = () => {
-    if (liveResumeTimerRef.current) {
-      clearTimeout(liveResumeTimerRef.current);
-      liveResumeTimerRef.current = null;
-    }
+    releaseLivePause();
     if (!vodPausedRef.current) {
       vodPausedRef.current = true;
       pauseBackgroundLoading();
@@ -128,16 +133,12 @@ export default function MainScreen({ client, userInfo, session, onLogout }: Main
   };
 
   const stopLivePlayback = () => {
-    if (liveResumeTimerRef.current) {
-      clearTimeout(liveResumeTimerRef.current);
-      liveResumeTimerRef.current = null;
-    }
+    releaseLivePause();
     setPlayback(null);
   };
 
   useEffect(() => {
     return () => {
-      if (liveResumeTimerRef.current) clearTimeout(liveResumeTimerRef.current);
       resumeBackgroundLoading();
     };
   }, []);
@@ -185,11 +186,7 @@ export default function MainScreen({ client, userInfo, session, onLogout }: Main
     if (tab === activeTab) return;
     if (activeTab === "live" && playback) {
       setPlayback(null);
-      if (liveResumeTimerRef.current) {
-        clearTimeout(liveResumeTimerRef.current);
-        liveResumeTimerRef.current = null;
-      }
-      resumeBackgroundLoading();
+      releaseLivePause();
     }
     setActiveTab(tab);
     setOverlayPlayback(null);
