@@ -61,18 +61,15 @@ const MAX_CONSECUTIVE_ERRORS_VOD = 5;
 const MAX_CONSECUTIVE_ERRORS_LIVE = 25;
 
 // Some Xtream panels serve VOD/episode files that are actually raw MPEG-TS
-// even though the URL ends in .mp4/.mkv. A native <video> element can't
-// demux MPEG-TS, so it never even reaches HAVE_METADATA (readyState stays
-// at 0) no matter how long you wait -- that's the real signature of a
-// disguised MPEG-TS file, NOT "it's just slow to buffer". A genuine
-// mp4/mkv typically reaches HAVE_METADATA within a second or two even on a
-// slow connection, because only the small moov/header atom needs to
-// download before metadata is known; the rest can keep buffering slowly
-// afterwards. So we only fall back to the mpegts.js demuxer if metadata
-// has genuinely never loaded by the deadline -- a real-but-slow file that
-// already has metadata is left alone and allowed to keep buffering,
-// instead of being aborted and restarted (which previously made slow
-// streams even slower).
+// even though the URL ends in .mp4/.mkv (or are genuinely .mkv, which
+// browsers can't decode natively at all). A native <video> element can't
+// demux either case, so it never reaches HAVE_METADATA (readyState stays at
+// 0) no matter how long you wait. A genuine mp4 typically reaches
+// HAVE_METADATA within a second or two even on a slow connection, because
+// only the small moov/header atom needs to download before metadata is
+// known -- the rest can keep buffering slowly afterwards. So we fall back
+// to the mpegts.js demuxer if metadata has genuinely never loaded by this
+// deadline; a real-but-slow file that already has metadata is left alone.
 const NATIVE_STARTUP_TIMEOUT_MS = 9000;
 
 interface AudioTrackOption {
@@ -97,6 +94,15 @@ export default function VideoPlayer({
   const errorCountRef = useRef(0);
   const nativeFallbackTimer = useRef<ReturnType<typeof setTimeout>>();
   const metadataLoadedRef = useRef(false);
+  // True while we're in the "native <video src>, but might secretly be
+  // MPEG-TS" branch and haven't yet tried the mpegts.js fallback. Lets the
+  // shared 'error' listener react to an immediate native decode failure
+  // (e.g. genuine .mkv, which browsers reject right away instead of just
+  // sitting at readyState 0) by switching engines instead of just showing
+  // an error the fallback never gets a chance to clear.
+  const nativeFallbackPendingRef = useRef(false);
+  const nativeFallbackUsedRef = useRef(false);
+  const currentUrlRef = useRef(url);
 
   const [playing, setPlaying] = useState(false);
   const [muted, setMuted] = useState(false);
@@ -135,7 +141,7 @@ export default function VideoPlayer({
 
   // Starts (or restarts) playback via the mpegts.js demuxer, used both for
   // genuine .ts URLs and as the fallback when a "native" URL turns out to
-  // actually be MPEG-TS in disguise.
+  // actually be MPEG-TS (or MKV) in disguise.
   //
   // Live channels get extra buffering/latency tuning for smoothness (see
   // below) -- but that tuning must NOT apply to VOD/episodes. mpegts.js's
@@ -150,6 +156,17 @@ export default function VideoPlayer({
     if (!mpegts.isSupported()) {
       setError("MPEG-TS playback is not supported.");
       return;
+    }
+    // Clear any stale error left over from the native attempt that's being
+    // replaced -- otherwise the error overlay stays on screen forever even
+    // though this fallback attempt might play back just fine.
+    setError("");
+    setBuffering(true);
+    nativeFallbackPendingRef.current = false;
+    nativeFallbackUsedRef.current = true;
+    if (nativeFallbackTimer.current) {
+      clearTimeout(nativeFallbackTimer.current);
+      nativeFallbackTimer.current = undefined;
     }
     video.removeAttribute("src");
     video.load();
@@ -204,6 +221,9 @@ export default function VideoPlayer({
     setPlaying(false);
     errorCountRef.current = 0;
     metadataLoadedRef.current = false;
+    nativeFallbackPendingRef.current = false;
+    nativeFallbackUsedRef.current = false;
+    currentUrlRef.current = url;
     setAudioTracks([]);
     setActiveAudioTrack(null);
     video.removeAttribute("src");
@@ -288,12 +308,15 @@ export default function VideoPlayer({
       } else if (type === "mpegts") {
         startMpegts(video, url);
       } else {
-        // "native" -- but if this turns out to actually be MPEG-TS wearing
-        // an .mp4/.mkv extension, the video element will never reach
-        // HAVE_METADATA. Arm a fallback timer that switches to the
-        // mpegts.js demuxer, but only if metadata genuinely never loaded
-        // by the deadline -- a real file that's just slow to buffer
-        // already has metadata and is left completely alone.
+        // "native" -- but if this turns out to actually be MPEG-TS or MKV
+        // wearing a friendlier extension, the video element will either
+        // never reach HAVE_METADATA, or fail immediately with an 'error'
+        // event (common for genuine .mkv, which Chromium rejects outright
+        // instead of stalling). Both cases are handled: a timer catches the
+        // "never loads" case, and the shared error listener below catches
+        // the "fails immediately" case and switches engines right away
+        // instead of waiting out the full timeout.
+        nativeFallbackPendingRef.current = true;
         video.src = url;
         video.play().catch(() => {});
 
@@ -372,6 +395,7 @@ export default function VideoPlayer({
       // container -- cancel the MPEG-TS-in-disguise fallback timer even
       // if the file is still slowly buffering and hasn't started playing.
       metadataLoadedRef.current = true;
+      nativeFallbackPendingRef.current = false;
       if (nativeFallbackTimer.current) {
         clearTimeout(nativeFallbackTimer.current);
         nativeFallbackTimer.current = undefined;
@@ -386,7 +410,25 @@ export default function VideoPlayer({
     const onPlaying = () => setBuffering(false);
     const onCanPlay = () => setBuffering(false);
     const onError = () => {
-      if (video.error) setError("Playback failed. The stream may be unavailable.");
+      if (!video.error) return;
+
+      // The native <video> element failed outright (typical for a genuine
+      // .mkv, or a disguised MPEG-TS that Chromium rejects immediately
+      // instead of silently stalling). If we haven't tried the mpegts.js
+      // fallback yet for this URL, switch engines right now instead of
+      // showing a dead-end error -- this is exactly the scenario that
+      // previously left users staring at a stuck error message while a
+      // perfectly playable fallback path was never attempted.
+      if (nativeFallbackPendingRef.current && !nativeFallbackUsedRef.current) {
+        if (nativeFallbackTimer.current) {
+          clearTimeout(nativeFallbackTimer.current);
+          nativeFallbackTimer.current = undefined;
+        }
+        startMpegts(video, currentUrlRef.current);
+        return;
+      }
+
+      setError("Playback failed. The stream may be unavailable.");
     };
 
     video.addEventListener("play", onPlay);
@@ -408,7 +450,7 @@ export default function VideoPlayer({
       video.removeEventListener("canplay", onCanPlay);
       video.removeEventListener("error", onError);
     };
-  }, [onTimeUpdate]);
+  }, [onTimeUpdate, startMpegts]);
 
   useEffect(() => {
     const onFsChange = () => setIsFullscreen(!!document.fullscreenElement);
