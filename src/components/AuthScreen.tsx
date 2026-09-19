@@ -1,6 +1,7 @@
 import { useState } from "react";
-import { Loader2, Mail, Lock, User } from "lucide-react";
+import { Loader2, Mail, Lock, User, Minus, X } from "lucide-react";
 import { supabase } from "@/lib/supabase";
+import { isElectron } from "@/lib/xtream";
 import { t, type AppLanguage } from "@/lib/settings";
 
 interface AuthScreenProps {
@@ -73,6 +74,33 @@ export default function AuthScreen({
 
   return (
     <div className="min-h-screen bg-[#0d0f14] flex items-center justify-center px-4 relative overflow-hidden">
+      {isElectron && (
+        <div
+          className="fixed top-0 left-0 right-0 h-10 flex items-center justify-end px-1.5 z-50"
+          style={{ WebkitAppRegion: "drag" } as React.CSSProperties}
+        >
+          <div
+            className="flex items-center gap-0.5"
+            style={{ WebkitAppRegion: "no-drag" } as React.CSSProperties}
+          >
+            <button
+              onClick={() => (window as any).electronApp?.minimizeWindow?.()}
+              className="flex items-center justify-center w-8 h-8 text-gray-500 hover:text-white hover:bg-white/10 rounded-md transition-colors"
+              title="Minimize"
+            >
+              <Minus className="w-3.5 h-3.5" />
+            </button>
+            <button
+              onClick={() => (window as any).electronApp?.closeWindow?.()}
+              className="flex items-center justify-center w-8 h-8 text-gray-500 hover:text-white hover:bg-red-600 rounded-md transition-colors"
+              title="Close"
+            >
+              <X className="w-3.5 h-3.5" />
+            </button>
+          </div>
+        </div>
+      )}
+
       <div
         className="absolute top-1/4 left-1/2 -translate-x-1/2 w-[700px] h-[700px] rounded-full blur-[140px] pointer-events-none"
         style={{ backgroundColor: `${accentColor}14` }}
