@@ -129,12 +129,32 @@ export default function VideoPlayer({
         isLive,
         url: targetUrl,
       },
-      {
-        enableWorker: true,
-        liveBufferLatencyChasing: isLive,
-        liveBufferLatencyMaxLatency: 5,
-        liveBufferLatencyMinRemain: 1,
-      }
+      isLive
+        ? {
+            // Live channels: prioritize smooth, uninterrupted playback over
+            // staying glued to the live edge. A deeper buffer plus a larger
+            // stash absorb network jitter without visible stutters, and we
+            // do NOT chase the live edge (which was causing rebuffer stalls
+            // every time it tried to catch up).
+            enableWorker: true,
+            enableStashBuffer: true,
+            stashInitialSize: 384,
+            liveBufferLatencyChasing: false,
+            liveBufferLatencyMaxLatency: 10,
+            liveBufferLatencyMinRemain: 3,
+            autoCleanupSourceBuffer: true,
+            autoCleanupMaxBackwardDuration: 30,
+            autoCleanupMinBackwardDuration: 20,
+            lazyLoad: false,
+          }
+        : {
+            // VOD/series: keep the original known-good, lightweight config.
+            // Do not apply any live-only tuning here.
+            enableWorker: true,
+            liveBufferLatencyChasing: false,
+            liveBufferLatencyMaxLatency: 5,
+            liveBufferLatencyMinRemain: 1,
+          }
     );
     player.attachMediaElement(video);
     player.load();
@@ -232,7 +252,7 @@ export default function VideoPlayer({
         // HAVE_METADATA. Arm a fallback timer that switches to the
         // mpegts.js demuxer, but only if metadata genuinely never loaded
         // by the deadline -- a real file that's just slow to buffer
-        // already has metadata and is left completely alone.
+        // already has metadata is left completely alone.
         video.src = url;
         video.play().catch(() => {});
 
