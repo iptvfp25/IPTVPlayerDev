@@ -50,26 +50,26 @@ function formatTime(seconds: number): string {
   return `${m}:${String(s).padStart(2, "0")}`;
 }
 
-// VOD/episodes are one-shot: if playback genuinely can't recover, showing an
-// error quickly is the right call. Live channels are a different story --
-// brief network blips, provider-side hiccups, and momentary segment drops
-// are normal and self-heal within a few seconds. Killing playback on the
-// same 5-strikes threshold used for VOD was making live channels far more
-// fragile than they needed to be, so live gets a much more generous budget
-// before giving up.
+// VOD/episodes keep the original, plain error tolerance that was already
+// working. Live channels get a much more generous budget before giving up,
+// since brief network blips/provider hiccups are normal on a continuous
+// live feed and shouldn't kill playback the same way a VOD failure should.
 const MAX_CONSECUTIVE_ERRORS_VOD = 5;
 const MAX_CONSECUTIVE_ERRORS_LIVE = 25;
 
 // Some Xtream panels serve VOD/episode files that are actually raw MPEG-TS
-// even though the URL ends in .mp4/.mkv (or are genuinely .mkv, which
-// browsers can't decode natively at all). A native <video> element can't
-// demux either case, so it never reaches HAVE_METADATA (readyState stays at
-// 0) no matter how long you wait. A genuine mp4 typically reaches
-// HAVE_METADATA within a second or two even on a slow connection, because
-// only the small moov/header atom needs to download before metadata is
-// known -- the rest can keep buffering slowly afterwards. So we fall back
-// to the mpegts.js demuxer if metadata has genuinely never loaded by this
-// deadline; a real-but-slow file that already has metadata is left alone.
+// even though the URL ends in .mp4/.mkv. A native <video> element can't
+// demux MPEG-TS, so it never even reaches HAVE_METADATA (readyState stays
+// at 0) no matter how long you wait -- that's the real signature of a
+// disguised MPEG-TS file, NOT "it's just slow to buffer". A genuine
+// mp4/mkv typically reaches HAVE_METADATA within a second or two even on a
+// slow connection, because only the small moov/header atom needs to
+// download before metadata is known; the rest can keep buffering slowly
+// afterwards. So we only fall back to the mpegts.js demuxer if metadata
+// has genuinely never loaded by the deadline -- a real-but-slow file that
+// already has metadata is left alone and allowed to keep buffering,
+// instead of being aborted and restarted (which previously made slow
+// streams even slower).
 const NATIVE_STARTUP_TIMEOUT_MS = 9000;
 
 interface AudioTrackOption {
@@ -94,15 +94,6 @@ export default function VideoPlayer({
   const errorCountRef = useRef(0);
   const nativeFallbackTimer = useRef<ReturnType<typeof setTimeout>>();
   const metadataLoadedRef = useRef(false);
-  // True while we're in the "native <video src>, but might secretly be
-  // MPEG-TS" branch and haven't yet tried the mpegts.js fallback. Lets the
-  // shared 'error' listener react to an immediate native decode failure
-  // (e.g. genuine .mkv, which browsers reject right away instead of just
-  // sitting at readyState 0) by switching engines instead of just showing
-  // an error the fallback never gets a chance to clear.
-  const nativeFallbackPendingRef = useRef(false);
-  const nativeFallbackUsedRef = useRef(false);
-  const currentUrlRef = useRef(url);
 
   const [playing, setPlaying] = useState(false);
   const [muted, setMuted] = useState(false);
@@ -141,32 +132,15 @@ export default function VideoPlayer({
 
   // Starts (or restarts) playback via the mpegts.js demuxer, used both for
   // genuine .ts URLs and as the fallback when a "native" URL turns out to
-  // actually be MPEG-TS (or MKV) in disguise.
+  // actually be MPEG-TS in disguise.
   //
-  // Live channels get extra buffering/latency tuning for smoothness (see
-  // below) -- but that tuning must NOT apply to VOD/episodes. mpegts.js's
-  // `lazyLoad` option (which the live tuning disables) is what throttles
-  // downloads to roughly playback speed; disabling it for a movie/episode
-  // makes the player try to download the *entire remaining file* as fast
-  // as possible with no cap, which is exactly what was causing movies and
-  // episodes to take forever (or never) to start. So the extra buffer/
-  // cleanup/lazyLoad settings are scoped to isLive only, and VOD keeps the
-  // original, plain configuration that was already working.
+  // Only live channels get the extra buffering/latency tuning below --
+  // VOD/episodes use the exact same plain configuration that was already
+  // working before, completely untouched by the live tuning.
   const startMpegts = useCallback((video: HTMLVideoElement, targetUrl: string) => {
     if (!mpegts.isSupported()) {
       setError("MPEG-TS playback is not supported.");
       return;
-    }
-    // Clear any stale error left over from the native attempt that's being
-    // replaced -- otherwise the error overlay stays on screen forever even
-    // though this fallback attempt might play back just fine.
-    setError("");
-    setBuffering(true);
-    nativeFallbackPendingRef.current = false;
-    nativeFallbackUsedRef.current = true;
-    if (nativeFallbackTimer.current) {
-      clearTimeout(nativeFallbackTimer.current);
-      nativeFallbackTimer.current = undefined;
     }
     video.removeAttribute("src");
     video.load();
@@ -191,7 +165,7 @@ export default function VideoPlayer({
           }
         : {
             enableWorker: true,
-            liveBufferLatencyChasing: false,
+            liveBufferLatencyChasing: isLive,
             liveBufferLatencyMaxLatency: 5,
             liveBufferLatencyMinRemain: 1,
           }
@@ -221,9 +195,6 @@ export default function VideoPlayer({
     setPlaying(false);
     errorCountRef.current = 0;
     metadataLoadedRef.current = false;
-    nativeFallbackPendingRef.current = false;
-    nativeFallbackUsedRef.current = false;
-    currentUrlRef.current = url;
     setAudioTracks([]);
     setActiveAudioTrack(null);
     video.removeAttribute("src");
@@ -236,21 +207,12 @@ export default function VideoPlayer({
         if (Hls.isSupported()) {
           const hls = new Hls({
             enableWorker: true,
-            // Smooth, uninterrupted live playback matters far more here
-            // than shaving latency -- low-latency mode and a thin buffer
-            // both make the player much more sensitive to normal network
-            // jitter, which is what shows up to the user as stutter/
-            // rebuffering. A deeper buffer and looser live-sync tolerance
-            // trade a couple of extra seconds of latency for a stream that
-            // doesn't hiccup. These settings are harmless for VOD (a
-            // finite, non-live HLS playlist) since hls.js only applies the
-            // live-sync ones when it detects a live playlist.
-            lowLatencyMode: false,
-            maxBufferLength: 30,
-            maxMaxBufferLength: 60,
-            backBufferLength: 90,
-            liveSyncDurationCount: 5,
-            liveMaxLatencyDurationCount: 15,
+            lowLatencyMode: isLive,
+            maxBufferLength: isLive ? 30 : 30,
+            maxMaxBufferLength: isLive ? 60 : 60,
+            backBufferLength: isLive ? 90 : undefined,
+            liveSyncDurationCount: isLive ? 5 : undefined,
+            liveMaxLatencyDurationCount: isLive ? 15 : undefined,
             xhrSetup: (xhr) => {
               xhr.withCredentials = false;
             },
@@ -308,15 +270,12 @@ export default function VideoPlayer({
       } else if (type === "mpegts") {
         startMpegts(video, url);
       } else {
-        // "native" -- but if this turns out to actually be MPEG-TS or MKV
-        // wearing a friendlier extension, the video element will either
-        // never reach HAVE_METADATA, or fail immediately with an 'error'
-        // event (common for genuine .mkv, which Chromium rejects outright
-        // instead of stalling). Both cases are handled: a timer catches the
-        // "never loads" case, and the shared error listener below catches
-        // the "fails immediately" case and switches engines right away
-        // instead of waiting out the full timeout.
-        nativeFallbackPendingRef.current = true;
+        // "native" -- but if this turns out to actually be MPEG-TS wearing
+        // an .mp4/.mkv extension, the video element will never reach
+        // HAVE_METADATA. Arm a fallback timer that switches to the
+        // mpegts.js demuxer, but only if metadata genuinely never loaded
+        // by the deadline -- a real file that's just slow to buffer
+        // already has metadata and is left completely alone.
         video.src = url;
         video.play().catch(() => {});
 
@@ -395,7 +354,6 @@ export default function VideoPlayer({
       // container -- cancel the MPEG-TS-in-disguise fallback timer even
       // if the file is still slowly buffering and hasn't started playing.
       metadataLoadedRef.current = true;
-      nativeFallbackPendingRef.current = false;
       if (nativeFallbackTimer.current) {
         clearTimeout(nativeFallbackTimer.current);
         nativeFallbackTimer.current = undefined;
@@ -410,25 +368,7 @@ export default function VideoPlayer({
     const onPlaying = () => setBuffering(false);
     const onCanPlay = () => setBuffering(false);
     const onError = () => {
-      if (!video.error) return;
-
-      // The native <video> element failed outright (typical for a genuine
-      // .mkv, or a disguised MPEG-TS that Chromium rejects immediately
-      // instead of silently stalling). If we haven't tried the mpegts.js
-      // fallback yet for this URL, switch engines right now instead of
-      // showing a dead-end error -- this is exactly the scenario that
-      // previously left users staring at a stuck error message while a
-      // perfectly playable fallback path was never attempted.
-      if (nativeFallbackPendingRef.current && !nativeFallbackUsedRef.current) {
-        if (nativeFallbackTimer.current) {
-          clearTimeout(nativeFallbackTimer.current);
-          nativeFallbackTimer.current = undefined;
-        }
-        startMpegts(video, currentUrlRef.current);
-        return;
-      }
-
-      setError("Playback failed. The stream may be unavailable.");
+      if (video.error) setError("Playback failed. The stream may be unavailable.");
     };
 
     video.addEventListener("play", onPlay);
@@ -450,7 +390,7 @@ export default function VideoPlayer({
       video.removeEventListener("canplay", onCanPlay);
       video.removeEventListener("error", onError);
     };
-  }, [onTimeUpdate, startMpegts]);
+  }, [onTimeUpdate]);
 
   useEffect(() => {
     const onFsChange = () => setIsFullscreen(!!document.fullscreenElement);
