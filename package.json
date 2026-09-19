@@ -21,8 +21,7 @@
     },
     "files": ["dist/**/*", "electron/**/*"],
     "win": {
-      "target": ["portable", "nsis"],
-      "icon": "public/image.ico"
+      "target": ["portable", "nsis"]
     },
     "nsis": {
       "oneClick": false,
