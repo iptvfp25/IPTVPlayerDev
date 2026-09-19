@@ -1,8 +1,8 @@
 import { useMemo, useState } from "react";
-import { ChevronLeft, Loader2, Search, Radio, Heart } from "lucide-react";
+import { ChevronLeft, Loader2, Search, Radio, Heart, History } from "lucide-react";
 import type { Category, EpisodeItem, ContentType } from "@/types/xtream";
 
-export type SidebarLevel = "categories" | "items" | "episodes" | "favorites";
+export type SidebarLevel = "categories" | "items" | "episodes" | "favorites" | "recent";
 
 export interface SidebarItem {
   id: string;
@@ -38,6 +38,8 @@ interface SidebarProps {
   favorites?: Set<string>;
   onToggleFavorite?: (item: SidebarItem) => void;
   onShowFavorites?: () => void;
+  recentlyWatched?: SidebarItem[];
+  onShowRecentlyWatched?: () => void;
 }
 
 // Shows the channel's own logo (from the provider's stream_icon field) when
@@ -76,6 +78,8 @@ export default function Sidebar({
   favorites,
   onToggleFavorite,
   onShowFavorites,
+  recentlyWatched = [],
+  onShowRecentlyWatched,
 }: SidebarProps) {
   const [search, setSearch] = useState("");
 
@@ -138,7 +142,7 @@ export default function Sidebar({
     );
   };
 
-  const showBackButton = level === "items" || level === "favorites";
+  const showBackButton = level === "items" || level === "favorites" || level === "recent";
 
   return (
     <div className="w-[480px] flex-shrink-0 bg-[#141822] flex flex-col h-full border-l border-white/5">
@@ -195,6 +199,19 @@ export default function Sidebar({
               </>
             ) : (
               <>
+                {recentlyWatched.length > 0 && onShowRecentlyWatched && (
+                  <button
+                    onClick={onShowRecentlyWatched}
+                    className="w-full text-left px-3 py-3 rounded-lg text-sm transition-all hover:scale-[1.02] hover:bg-white/5 border-l-2 border-transparent mb-1"
+                  >
+                    <div className="flex items-center gap-3">
+                      <History className="w-4 h-4 flex-shrink-0" style={{ color: accentColor }} />
+                      <span className="truncate text-gray-300 font-medium">Recently Watched</span>
+                      <span className="ml-auto text-xs text-gray-500">{recentlyWatched.length}</span>
+                    </div>
+                  </button>
+                )}
+
                 {favoriteChannels.length > 0 && onShowFavorites && (
                   <button
                     onClick={onShowFavorites}
@@ -249,6 +266,15 @@ export default function Sidebar({
               <div className="px-3 py-8 text-center text-gray-500 text-sm">No favorite channels yet.</div>
             )}
             {favoriteChannels.map((item) => renderChannelRow(item, selectedItem === item.id))}
+          </div>
+        )}
+
+        {!loading && !error && level === "recent" && (
+          <div className="space-y-1 px-2">
+            {recentlyWatched.length === 0 && (
+              <div className="px-3 py-8 text-center text-gray-500 text-sm">No recently watched channels yet.</div>
+            )}
+            {recentlyWatched.map((item) => renderChannelRow(item, selectedItem === item.id))}
           </div>
         )}
       </div>
