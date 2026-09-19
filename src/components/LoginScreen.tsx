@@ -16,9 +16,9 @@ const STORAGE_KEY = "xtream-credentials";
 // sample.
 const PRELOAD_ITEMS_PER_TYPE = 60;
 // Safety cap only -- normal completion happens as soon as every image has
-// actually loaded (or failed) and the warm-up stream has received its first
-// bytes. This just guarantees a handful of slow/broken items or an
-// unreachable provider can never leave the user stuck on the login screen.
+// actually loaded (or failed). This just guarantees a handful of
+// slow/broken items or an unreachable provider can never leave the user
+// stuck on the login screen.
 const PRELOAD_SAFETY_TIMEOUT_MS = 20000;
 
 type LoginMode = "credentials" | "url";
@@ -175,18 +175,8 @@ export default function LoginScreen({ onLogin }: LoginScreenProps) {
 
           const imagesReady = preloadImages(imageUrls);
 
-          // While the artwork finishes loading, also open a real connection
-          // to the provider's streaming endpoint (not just the JSON API) by
-          // silently starting a random episode from a random series in a
-          // hidden, muted <video> element. Xtream/CDN backends are often
-          // much slower on the very first stream request from a client --
-          // establishing that connection now means the first channel/movie/
-          // episode the user actually clicks on starts immediately instead
-          // of paying that "cold start" cost live.
-          const warmup = warmUpPlayback(client, seriesList).catch(() => {});
-
           await Promise.race([
-            Promise.all([imagesReady, vodPreload, seriesPreload, warmup]),
+            Promise.all([imagesReady, vodPreload, seriesPreload]),
             new Promise<void>((resolve) => setTimeout(resolve, PRELOAD_SAFETY_TIMEOUT_MS)),
           ]);
         } catch {
@@ -472,67 +462,4 @@ export default function LoginScreen({ onLogin }: LoginScreenProps) {
       </div>
     </div>
   );
-}
-
-// Silently plays a few seconds of a random episode from a random series in
-// an off-screen, muted <video> element right after login. This forces the
-// browser to open a real connection to the provider's streaming endpoint
-// (TCP/TLS handshake, provider-side session bookkeeping, etc.) ahead of
-// time, so the first channel/movie/episode the user actually clicks on
-// starts immediately instead of paying that "cold start" cost live.
-async function warmUpPlayback(client: XtreamClient, seriesList: any[]): Promise<void> {
-  if (!seriesList || seriesList.length === 0) return;
-
-  const randomSeries = seriesList[Math.floor(Math.random() * seriesList.length)];
-  const seriesId = randomSeries?.series_id;
-  if (!seriesId) return;
-
-  const info = await client.getSeriesInfo(seriesId).catch(() => null);
-  if (!info) return;
-
-  const seasonKeys = Object.keys(info.episodes || {});
-  if (seasonKeys.length === 0) return;
-  const randomSeason = seasonKeys[Math.floor(Math.random() * seasonKeys.length)];
-  const episodesInSeason = info.episodes[randomSeason] || [];
-  if (episodesInSeason.length === 0) return;
-  const randomEpisode = episodesInSeason[Math.floor(Math.random() * episodesInSeason.length)];
-
-  const episodeId = Number(randomEpisode?.id) || Number(randomEpisode?.episode_id) || 0;
-  if (!episodeId) return;
-  const ext = randomEpisode?.container_extension || "mp4";
-  const url = client.getEpisodeUrl(episodeId, ext);
-
-  await new Promise<void>((resolve) => {
-    const video = document.createElement("video");
-    video.style.position = "fixed";
-    video.style.left = "-9999px";
-    video.style.width = "1px";
-    video.style.height = "1px";
-    video.muted = true;
-    video.preload = "auto";
-    video.src = url;
-    document.body.appendChild(video);
-
-    let done = false;
-    const finish = () => {
-      if (done) return;
-      done = true;
-      try {
-        video.pause();
-        video.removeAttribute("src");
-        video.load();
-      } catch {}
-      video.remove();
-      resolve();
-    };
-
-    // As soon as we've started actually receiving data, the connection is
-    // warm -- no need to keep buffering/playing further.
-    video.addEventListener("loadeddata", finish, { once: true });
-    video.addEventListener("error", finish, { once: true });
-    video.play().catch(() => {});
-
-    // Safety cap in case the stream never fires an event.
-    setTimeout(finish, 8000);
-  });
 }
