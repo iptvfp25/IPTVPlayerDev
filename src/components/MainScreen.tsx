@@ -148,9 +148,10 @@ export default function MainScreen({ client, userInfo, session, onLogout }: Main
   };
 
   const stopLivePlayback = () => {
-    releaseLivePause();
-    setPlayback(null);
-  };
+  releaseLivePause();
+  releaseVodPause();
+  setPlayback(null);
+};
 
   useEffect(() => {
     return () => {
