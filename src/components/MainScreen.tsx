@@ -259,6 +259,13 @@ export default function MainScreen({ client, userInfo, session, onLogout }: Main
   const playVod = (streamId: number, ext: string, name: string, poster?: string, rating?: string) => {
     stopLivePlayback();
     prioritizeVodPlayback();
+    // Closing the series detail popup (if it happened to still be open --
+    // e.g. playing from Favorites/Search while a series modal was open in
+    // another tab) matters here too: it and the overlay player share the
+    // same z-index, and the modal renders later in the DOM, so it would
+    // otherwise visually sit on top of the video that's actually loading
+    // underneath -- looking exactly like playback being stuck.
+    setSeriesDetail(null);
     const url = client.getVodUrl(streamId, ext);
     setOverlayPlayback({ url, title: name, isLive: false });
     recordWatched({
@@ -293,8 +300,6 @@ export default function MainScreen({ client, userInfo, session, onLogout }: Main
     }
     stopLivePlayback();
     prioritizeVodPlayback();
-    const url = client.getEpisodeUrl(episode.episode_id, episode.container_extension);
-    setOverlayPlayback({ url, title: `${seriesName} - ${episode.title}`, isLive: false });
     if (seriesDetail) {
       recordWatched({
         id: String(seriesDetail.seriesId),
@@ -307,6 +312,15 @@ export default function MainScreen({ client, userInfo, session, onLogout }: Main
         genre: seriesDetail.genre,
       });
     }
+    // The series detail popup MUST close here -- it and the overlay player
+    // below share the same z-index (z-50), and since the modal is mounted
+    // later in the DOM tree it paints on top of the video that starts
+    // loading underneath. Without this, the episode was actually
+    // buffering/playing the whole time, just invisibly, behind what looked
+    // like a stuck loading state.
+    setSeriesDetail(null);
+    const url = client.getEpisodeUrl(episode.episode_id, episode.container_extension);
+    setOverlayPlayback({ url, title: `${seriesName} - ${episode.title}`, isLive: false });
   };
 
   const handleBackToCategories = () => {
