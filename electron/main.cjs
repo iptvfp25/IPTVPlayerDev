@@ -13,7 +13,6 @@ function createWindow() {
     minHeight: 600,
     backgroundColor: '#0a0a0a',
     title: 'IPTV Desktop Player',
-    icon: path.join(__dirname, '..', 'public', 'image.ico'),
     // Frameless window: the OS title bar (with the app name) is gone.
     // Since there's no native frame anymore, the renderer provides its own
     // draggable region and minimize/maximize/close buttons -- wired up via
