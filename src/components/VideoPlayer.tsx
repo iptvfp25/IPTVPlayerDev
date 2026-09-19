@@ -137,14 +137,15 @@ export default function VideoPlayer({
   // genuine .ts URLs and as the fallback when a "native" URL turns out to
   // actually be MPEG-TS in disguise.
   //
-  // Live channels are the app's core experience, so this configuration is
-  // tuned for smoothness over raw low-latency: liveBufferLatencyChasing is
-  // disabled because its automatic forward-seeks to "catch up" to the live
-  // edge are exactly what causes the visible skips/stutters users see --
-  // trading a little extra latency for a stream that never jumps is the
-  // right tradeoff here. A larger initial stash buffer and periodic
-  // SourceBuffer cleanup keep memory bounded and playback smooth even
-  // during long live sessions.
+  // Live channels get extra buffering/latency tuning for smoothness (see
+  // below) -- but that tuning must NOT apply to VOD/episodes. mpegts.js's
+  // `lazyLoad` option (which the live tuning disables) is what throttles
+  // downloads to roughly playback speed; disabling it for a movie/episode
+  // makes the player try to download the *entire remaining file* as fast
+  // as possible with no cap, which is exactly what was causing movies and
+  // episodes to take forever (or never) to start. So the extra buffer/
+  // cleanup/lazyLoad settings are scoped to isLive only, and VOD keeps the
+  // original, plain configuration that was already working.
   const startMpegts = useCallback((video: HTMLVideoElement, targetUrl: string) => {
     if (!mpegts.isSupported()) {
       setError("MPEG-TS playback is not supported.");
@@ -158,18 +159,25 @@ export default function VideoPlayer({
         isLive,
         url: targetUrl,
       },
-      {
-        enableWorker: true,
-        enableStashBuffer: true,
-        stashInitialSize: isLive ? 384 : undefined,
-        liveBufferLatencyChasing: false,
-        liveBufferLatencyMaxLatency: 10,
-        liveBufferLatencyMinRemain: 3,
-        autoCleanupSourceBuffer: true,
-        autoCleanupMaxBackwardDuration: 30,
-        autoCleanupMinBackwardDuration: 20,
-        lazyLoad: false,
-      }
+      isLive
+        ? {
+            enableWorker: true,
+            enableStashBuffer: true,
+            stashInitialSize: 384,
+            liveBufferLatencyChasing: false,
+            liveBufferLatencyMaxLatency: 10,
+            liveBufferLatencyMinRemain: 3,
+            autoCleanupSourceBuffer: true,
+            autoCleanupMaxBackwardDuration: 30,
+            autoCleanupMinBackwardDuration: 20,
+            lazyLoad: false,
+          }
+        : {
+            enableWorker: true,
+            liveBufferLatencyChasing: false,
+            liveBufferLatencyMaxLatency: 5,
+            liveBufferLatencyMinRemain: 1,
+          }
     );
     player.attachMediaElement(video);
     player.load();
@@ -214,10 +222,12 @@ export default function VideoPlayer({
             // jitter, which is what shows up to the user as stutter/
             // rebuffering. A deeper buffer and looser live-sync tolerance
             // trade a couple of extra seconds of latency for a stream that
-            // doesn't hiccup.
+            // doesn't hiccup. These settings are harmless for VOD (a
+            // finite, non-live HLS playlist) since hls.js only applies the
+            // live-sync ones when it detects a live playlist.
             lowLatencyMode: false,
-            maxBufferLength: isLive ? 30 : 30,
-            maxMaxBufferLength: isLive ? 60 : 60,
+            maxBufferLength: 30,
+            maxMaxBufferLength: 60,
             backBufferLength: 90,
             liveSyncDurationCount: 5,
             liveMaxLatencyDurationCount: 15,
@@ -318,16 +328,17 @@ export default function VideoPlayer({
   // media element -- used for live channels whose multiple audio streams
   // are demuxed directly onto the <video> element rather than through
   // hls.js's own audio-track API (which only applies to HLS renditions).
+  // Note: mpegts.js (used for most live Electron playback) only exposes a
+  // single audio track to the browser today, so this will usually report
+  // one track even on multi-language broadcasts -- that's a limitation of
+  // the demuxing library itself, not this detection code.
   useEffect(() => {
     const video = videoRef.current as (HTMLVideoElement & { audioTracks?: any }) | null;
     if (!video || !video.audioTracks) return;
 
     const syncTracks = () => {
       const list = video.audioTracks;
-      if (!list || list.length <= 1) {
-        setAudioTracks((prev) => (hlsRef.current ? prev : []));
-        return;
-      }
+      if (!list || list.length === 0) return;
       const tracks: AudioTrackOption[] = [];
       let active = 0;
       for (let i = 0; i < list.length; i++) {
@@ -335,8 +346,8 @@ export default function VideoPlayer({
         tracks.push({ id: i, label: t.label || t.language || `Audio ${i + 1}` });
         if (t.enabled) active = i;
       }
-      setAudioTracks(tracks);
-      setActiveAudioTrack(active);
+      setAudioTracks((prev) => (hlsRef.current && prev.length > 0 ? prev : tracks));
+      setActiveAudioTrack((prev) => (hlsRef.current && prev !== null ? prev : active));
     };
 
     syncTracks();
@@ -517,9 +528,11 @@ export default function VideoPlayer({
       )}
 
       {/* Audio track selector -- live channels only, top-right, fades in/out
-          with the rest of the controls, and only appears once more than one
-          audio track has actually been detected on the stream. */}
-      {isLive && audioTracks.length > 1 && (
+          with the rest of the controls. Always visible for live so it's
+          discoverable even before any alternate track has been detected;
+          if the current stream only has one audio track, the menu says so
+          instead of showing an empty list. */}
+      {isLive && (
         <div
           className={`absolute top-3 right-3 z-20 transition-opacity duration-300 ${
             showControls ? "opacity-100" : "opacity-0 pointer-events-none"
@@ -534,21 +547,27 @@ export default function VideoPlayer({
           </button>
           {showAudioMenu && (
             <div
-              className="absolute right-0 mt-2 w-48 bg-[#141822] border border-white/10 rounded-lg shadow-2xl overflow-hidden py-1"
+              className="absolute right-0 mt-2 w-56 bg-[#141822] border border-white/10 rounded-lg shadow-2xl overflow-hidden py-1"
               onClick={(e) => e.stopPropagation()}
             >
-              {audioTracks.map((t) => (
-                <button
-                  key={t.id}
-                  onClick={() => selectAudioTrack(t.id)}
-                  className="w-full flex items-center justify-between gap-2 px-3 py-2 text-sm text-gray-300 hover:bg-white/5 hover:text-white transition-colors text-left"
-                >
-                  <span className="truncate">{t.label}</span>
-                  {activeAudioTrack === t.id && (
-                    <Check className="w-3.5 h-3.5 flex-shrink-0" style={{ color: accentColor }} />
-                  )}
-                </button>
-              ))}
+              {audioTracks.length > 1 ? (
+                audioTracks.map((t) => (
+                  <button
+                    key={t.id}
+                    onClick={() => selectAudioTrack(t.id)}
+                    className="w-full flex items-center justify-between gap-2 px-3 py-2 text-sm text-gray-300 hover:bg-white/5 hover:text-white transition-colors text-left"
+                  >
+                    <span className="truncate">{t.label}</span>
+                    {activeAudioTrack === t.id && (
+                      <Check className="w-3.5 h-3.5 flex-shrink-0" style={{ color: accentColor }} />
+                    )}
+                  </button>
+                ))
+              ) : (
+                <p className="px-3 py-2 text-xs text-gray-500">
+                  No additional audio tracks detected
+                </p>
+              )}
             </div>
           )}
         </div>
