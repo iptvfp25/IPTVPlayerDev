@@ -10,8 +10,6 @@ import {
   Loader2,
   SkipBack,
   SkipForward,
-  Languages,
-  Check,
 } from "lucide-react";
 import Hls from "hls.js";
 import mpegts from "mpegts.js";
@@ -50,12 +48,7 @@ function formatTime(seconds: number): string {
   return `${m}:${String(s).padStart(2, "0")}`;
 }
 
-// VOD/episodes keep the original, plain error tolerance that was already
-// working. Live channels get a much more generous budget before giving up,
-// since brief network blips/provider hiccups are normal on a continuous
-// live feed and shouldn't kill playback the same way a VOD failure should.
-const MAX_CONSECUTIVE_ERRORS_VOD = 5;
-const MAX_CONSECUTIVE_ERRORS_LIVE = 25;
+const MAX_CONSECUTIVE_ERRORS = 5;
 
 // Some Xtream panels serve VOD/episode files that are actually raw MPEG-TS
 // even though the URL ends in .mp4/.mkv. A native <video> element can't
@@ -71,11 +64,6 @@ const MAX_CONSECUTIVE_ERRORS_LIVE = 25;
 // instead of being aborted and restarted (which previously made slow
 // streams even slower).
 const NATIVE_STARTUP_TIMEOUT_MS = 9000;
-
-interface AudioTrackOption {
-  id: number;
-  label: string;
-}
 
 export default function VideoPlayer({
   url,
@@ -104,11 +92,6 @@ export default function VideoPlayer({
   const [error, setError] = useState("");
   const [showControls, setShowControls] = useState(true);
   const [isFullscreen, setIsFullscreen] = useState(false);
-  const [audioTracks, setAudioTracks] = useState<AudioTrackOption[]>([]);
-  const [activeAudioTrack, setActiveAudioTrack] = useState<number | null>(null);
-  const [showAudioMenu, setShowAudioMenu] = useState(false);
-
-  const maxConsecutiveErrors = isLive ? MAX_CONSECUTIVE_ERRORS_LIVE : MAX_CONSECUTIVE_ERRORS_VOD;
 
   const destroyPlayers = useCallback(() => {
     if (hlsRef.current) {
@@ -133,10 +116,6 @@ export default function VideoPlayer({
   // Starts (or restarts) playback via the mpegts.js demuxer, used both for
   // genuine .ts URLs and as the fallback when a "native" URL turns out to
   // actually be MPEG-TS in disguise.
-  //
-  // Only live channels get the extra buffering/latency tuning below --
-  // VOD/episodes use the exact same plain configuration that was already
-  // working before, completely untouched by the live tuning.
   const startMpegts = useCallback((video: HTMLVideoElement, targetUrl: string) => {
     if (!mpegts.isSupported()) {
       setError("MPEG-TS playback is not supported.");
@@ -150,32 +129,19 @@ export default function VideoPlayer({
         isLive,
         url: targetUrl,
       },
-      isLive
-        ? {
-            enableWorker: true,
-            enableStashBuffer: true,
-            stashInitialSize: 384,
-            liveBufferLatencyChasing: false,
-            liveBufferLatencyMaxLatency: 10,
-            liveBufferLatencyMinRemain: 3,
-            autoCleanupSourceBuffer: true,
-            autoCleanupMaxBackwardDuration: 30,
-            autoCleanupMinBackwardDuration: 20,
-            lazyLoad: false,
-          }
-        : {
-            enableWorker: true,
-            liveBufferLatencyChasing: isLive,
-            liveBufferLatencyMaxLatency: 5,
-            liveBufferLatencyMinRemain: 1,
-          }
+      {
+        enableWorker: true,
+        liveBufferLatencyChasing: isLive,
+        liveBufferLatencyMaxLatency: 5,
+        liveBufferLatencyMinRemain: 1,
+      }
     );
     player.attachMediaElement(video);
     player.load();
     player.play();
     player.on(mpegts.Events.ERROR, () => {
       errorCountRef.current += 1;
-      if (errorCountRef.current >= maxConsecutiveErrors) {
+      if (errorCountRef.current >= MAX_CONSECUTIVE_ERRORS) {
         setError("Stream playback error. The stream may be offline.");
       }
     });
@@ -183,7 +149,7 @@ export default function VideoPlayer({
       errorCountRef.current = 0;
     });
     mpegtsRef.current = player;
-  }, [isLive, maxConsecutiveErrors]);
+  }, [isLive]);
 
   useEffect(() => {
     const video = videoRef.current;
@@ -195,24 +161,26 @@ export default function VideoPlayer({
     setPlaying(false);
     errorCountRef.current = 0;
     metadataLoadedRef.current = false;
-    setAudioTracks([]);
-    setActiveAudioTrack(null);
     video.removeAttribute("src");
     video.load();
 
     const type = detectStreamType(url);
 
+    // Playback starts as soon as the browser has enough data (native
+    // "waiting"/"playing" events already show a buffering spinner in the
+    // meantime -- see the buffering state above). We intentionally do NOT
+    // delay the play() call to wait for a fixed amount of buffer: browsers
+    // only allow autoplay within a short window after the user's click
+    // gesture, and delaying play() by several seconds causes it to be
+    // silently rejected, requiring a second manual click to start.
     try {
       if (type === "hls") {
         if (Hls.isSupported()) {
           const hls = new Hls({
             enableWorker: true,
             lowLatencyMode: isLive,
-            maxBufferLength: isLive ? 30 : 30,
-            maxMaxBufferLength: isLive ? 60 : 60,
-            backBufferLength: isLive ? 90 : undefined,
-            liveSyncDurationCount: isLive ? 5 : undefined,
-            liveMaxLatencyDurationCount: isLive ? 15 : undefined,
+            maxBufferLength: isLive ? 10 : 30,
+            maxMaxBufferLength: isLive ? 20 : 60,
             xhrSetup: (xhr) => {
               xhr.withCredentials = false;
             },
@@ -226,23 +194,12 @@ export default function VideoPlayer({
           hls.on(Hls.Events.FRAG_LOADED, () => {
             errorCountRef.current = 0;
           });
-          hls.on(Hls.Events.AUDIO_TRACKS_UPDATED, () => {
-            const tracks = hls.audioTracks.map((t, idx) => ({
-              id: idx,
-              label: t.name || t.lang || `Audio ${idx + 1}`,
-            }));
-            setAudioTracks(tracks);
-            setActiveAudioTrack(hls.audioTrack);
-          });
-          hls.on(Hls.Events.AUDIO_TRACK_SWITCHED, (_e, data) => {
-            setActiveAudioTrack(data.id);
-          });
           hls.on(Hls.Events.ERROR, (_e, data) => {
             if (!data.fatal) return;
 
             if (data.type === Hls.ErrorTypes.NETWORK_ERROR) {
               errorCountRef.current += 1;
-              if (errorCountRef.current >= maxConsecutiveErrors) {
+              if (errorCountRef.current >= MAX_CONSECUTIVE_ERRORS) {
                 setError(
                   "Impossibile raggiungere il server IPTV. Il flusso potrebbe essere bloccato dal provider o temporaneamente non disponibile."
                 );
@@ -251,7 +208,7 @@ export default function VideoPlayer({
               setTimeout(() => hls.startLoad(), 2000);
             } else if (data.type === Hls.ErrorTypes.MEDIA_ERROR) {
               errorCountRef.current += 1;
-              if (errorCountRef.current >= maxConsecutiveErrors) {
+              if (errorCountRef.current >= MAX_CONSECUTIVE_ERRORS) {
                 setError("Errore di decodifica del flusso video.");
                 return;
               }
@@ -292,7 +249,7 @@ export default function VideoPlayer({
     return () => {
       destroyPlayers();
     };
-  }, [url, isLive, destroyPlayers, startMpegts, maxConsecutiveErrors]);
+  }, [url, isLive, destroyPlayers, startMpegts]);
 
   useEffect(() => {
     const video = videoRef.current;
@@ -305,43 +262,6 @@ export default function VideoPlayer({
     video.addEventListener("loadedmetadata", onLoaded, { once: true });
     return () => video.removeEventListener("loadedmetadata", onLoaded);
   }, [resumeTime, url]);
-
-  // Detects native (Chromium) multi-audio-track support for the current
-  // media element -- used for live channels whose multiple audio streams
-  // are demuxed directly onto the <video> element rather than through
-  // hls.js's own audio-track API (which only applies to HLS renditions).
-  // Note: mpegts.js (used for most live Electron playback) only exposes a
-  // single audio track to the browser today, so this will usually report
-  // one track even on multi-language broadcasts -- that's a limitation of
-  // the demuxing library itself, not this detection code.
-  useEffect(() => {
-    const video = videoRef.current as (HTMLVideoElement & { audioTracks?: any }) | null;
-    if (!video || !video.audioTracks) return;
-
-    const syncTracks = () => {
-      const list = video.audioTracks;
-      if (!list || list.length === 0) return;
-      const tracks: AudioTrackOption[] = [];
-      let active = 0;
-      for (let i = 0; i < list.length; i++) {
-        const t = list[i];
-        tracks.push({ id: i, label: t.label || t.language || `Audio ${i + 1}` });
-        if (t.enabled) active = i;
-      }
-      setAudioTracks((prev) => (hlsRef.current && prev.length > 0 ? prev : tracks));
-      setActiveAudioTrack((prev) => (hlsRef.current && prev !== null ? prev : active));
-    };
-
-    syncTracks();
-    video.audioTracks.addEventListener?.("addtrack", syncTracks);
-    video.audioTracks.addEventListener?.("removetrack", syncTracks);
-    video.audioTracks.addEventListener?.("change", syncTracks);
-    return () => {
-      video.audioTracks?.removeEventListener?.("addtrack", syncTracks);
-      video.audioTracks?.removeEventListener?.("removetrack", syncTracks);
-      video.audioTracks?.removeEventListener?.("change", syncTracks);
-    };
-  }, [url]);
 
   useEffect(() => {
     const video = videoRef.current;
@@ -402,10 +322,7 @@ export default function VideoPlayer({
     setShowControls(true);
     clearTimeout(hideTimer.current);
     hideTimer.current = setTimeout(() => {
-      if (playing) {
-        setShowControls(false);
-        setShowAudioMenu(false);
-      }
+      if (playing) setShowControls(false);
     }, 3000);
   }, [playing]);
 
@@ -452,22 +369,6 @@ export default function VideoPlayer({
     }
   };
 
-  const selectAudioTrack = (id: number) => {
-    if (hlsRef.current) {
-      hlsRef.current.audioTrack = id;
-    } else {
-      const video = videoRef.current as (HTMLVideoElement & { audioTracks?: any }) | null;
-      const list = video?.audioTracks;
-      if (list) {
-        for (let i = 0; i < list.length; i++) {
-          list[i].enabled = i === id;
-        }
-      }
-    }
-    setActiveAudioTrack(id);
-    setShowAudioMenu(false);
-  };
-
   const handleContainerClick = (e: React.MouseEvent) => {
     if ((e.target as HTMLElement).closest("button, input")) return;
     clearTimeout(clickTimer.current);
@@ -489,11 +390,11 @@ export default function VideoPlayer({
       ref={containerRef}
       className={
         isFullscreen
-          ? "relative bg-black overflow-hidden group cursor-default select-none fixed inset-0 z-[999] w-screen h-screen"
-          : "relative aspect-video bg-black rounded-xl overflow-hidden group cursor-default select-none"
+          ? "relative bg-black overflow-hidden group cursor-pointer select-none fixed inset-0 z-[999] w-screen h-screen"
+          : "relative aspect-video bg-black rounded-xl overflow-hidden group cursor-pointer select-none"
       }
       onMouseMove={resetHideTimer}
-      onMouseLeave={() => { if (playing) { setShowControls(false); setShowAudioMenu(false); } }}
+      onMouseLeave={() => playing && setShowControls(false)}
       onClick={handleContainerClick}
       onDoubleClick={handleContainerDoubleClick}
     >
@@ -506,52 +407,6 @@ export default function VideoPlayer({
       {isLive && playing && (
         <div className="absolute top-3 left-3 bg-red-600 text-white text-[10px] font-bold px-2 py-0.5 rounded tracking-wider z-10">
           LIVE
-        </div>
-      )}
-
-      {/* Audio track selector -- live channels only, top-right, fades in/out
-          with the rest of the controls. Always visible for live so it's
-          discoverable even before any alternate track has been detected;
-          if the current stream only has one audio track, the menu says so
-          instead of showing an empty list. */}
-      {isLive && (
-        <div
-          className={`absolute top-3 right-3 z-20 transition-opacity duration-300 ${
-            showControls ? "opacity-100" : "opacity-0 pointer-events-none"
-          }`}
-        >
-          <button
-            onClick={(e) => { e.stopPropagation(); setShowAudioMenu((s) => !s); }}
-            className="w-9 h-9 rounded-full bg-black/60 hover:bg-black/80 flex items-center justify-center text-white transition-colors"
-            title="Audio track"
-          >
-            <Languages className="w-4 h-4" />
-          </button>
-          {showAudioMenu && (
-            <div
-              className="absolute right-0 mt-2 w-56 bg-[#141822] border border-white/10 rounded-lg shadow-2xl overflow-hidden py-1"
-              onClick={(e) => e.stopPropagation()}
-            >
-              {audioTracks.length > 1 ? (
-                audioTracks.map((t) => (
-                  <button
-                    key={t.id}
-                    onClick={() => selectAudioTrack(t.id)}
-                    className="w-full flex items-center justify-between gap-2 px-3 py-2 text-sm text-gray-300 hover:bg-white/5 hover:text-white transition-colors text-left"
-                  >
-                    <span className="truncate">{t.label}</span>
-                    {activeAudioTrack === t.id && (
-                      <Check className="w-3.5 h-3.5 flex-shrink-0" style={{ color: accentColor }} />
-                    )}
-                  </button>
-                ))
-              ) : (
-                <p className="px-3 py-2 text-xs text-gray-500">
-                  No additional audio tracks detected
-                </p>
-              )}
-            </div>
-          )}
         </div>
       )}
 
