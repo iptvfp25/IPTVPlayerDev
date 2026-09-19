@@ -4,6 +4,7 @@ import { XtreamClient } from "@/lib/xtream";
 import type { Category } from "@/types/xtream";
 import { isWatched, makeKey } from "@/lib/watchProgress";
 import { addDownload, triggerDownload } from "@/lib/downloads";
+import { getRecentlyWatched, subscribeRecentlyWatched } from "@/lib/recentlyWatched";
 
 export interface BrowseItem {
   id: string;
@@ -48,6 +49,7 @@ function handleDownloadVod(item: BrowseItem, client: XtreamClient) {
   triggerDownload(entry);
 }
 
+// Module-level cache so data survives tab switches
 const browseCache: Record<string, CategoryRow[]> = {};
 type BrowseListener = (rows: CategoryRow[]) => void;
 const browseListeners: Record<string, Set<BrowseListener>> = { vod: new Set(), series: new Set() };
@@ -426,6 +428,83 @@ const HorizontalRow = memo(function HorizontalRow({
   );
 });
 
+// "Recently Watched" is a synthetic row built purely from local watch
+// history (see lib/recentlyWatched.ts) -- it never touches the provider
+// API, so it renders instantly and doesn't participate in the lazy
+// category-loading system the real rows use. Hidden entirely once the
+// list is empty so new users don't see a permanently blank shelf.
+function RecentlyWatchedRow({
+  contentType,
+  onItemClick,
+  favorites,
+  onToggleFavorite,
+  accentColor,
+  client,
+}: {
+  contentType: "vod" | "series";
+  onItemClick: (item: BrowseItem) => void;
+  favorites: Set<string>;
+  onToggleFavorite: (item: BrowseItem) => void;
+  accentColor?: string;
+  client: XtreamClient;
+}) {
+  const [items, setItems] = useState<BrowseItem[]>(() =>
+    getRecentlyWatched(contentType).map((e) => ({
+      id: e.id,
+      name: e.name,
+      categoryId: e.categoryId || "",
+      containerExtension: e.containerExtension,
+      seriesId: e.seriesId,
+      poster: e.poster,
+      rating: e.rating,
+      plot: e.plot,
+      genre: e.genre,
+    }))
+  );
+
+  useEffect(() => {
+    const refresh = () =>
+      setItems(
+        getRecentlyWatched(contentType).map((e) => ({
+          id: e.id,
+          name: e.name,
+          categoryId: e.categoryId || "",
+          containerExtension: e.containerExtension,
+          seriesId: e.seriesId,
+          poster: e.poster,
+          rating: e.rating,
+          plot: e.plot,
+          genre: e.genre,
+        }))
+      );
+    return subscribeRecentlyWatched(refresh);
+  }, [contentType]);
+
+  if (items.length === 0) return null;
+
+  const favKey = contentType === "vod" ? "vod" : "series";
+
+  return (
+    <div className="mb-8">
+      <h3 className="text-white font-semibold text-sm mb-3 px-6">Recently Watched</h3>
+      <div className="flex gap-3 overflow-x-auto px-6 scrollbar-hide" style={{ scrollbarWidth: "none" }}>
+        {items.map((item) => (
+          <PosterCard
+            key={item.id}
+            item={item}
+            contentType={contentType}
+            onClick={() => onItemClick(item)}
+            isFav={favorites.has(`${favKey}:${item.id}`)}
+            onToggleFav={() => onToggleFavorite(item)}
+            accentColor={accentColor}
+            onDownload={contentType === "vod" ? () => handleDownloadVod(item, client) : undefined}
+          />
+        ))}
+      </div>
+    </div>
+  );
+}
+
 export default function NetflixBrowse({
   client,
   contentType,
@@ -473,6 +552,14 @@ export default function NetflixBrowse({
 
   return (
     <div className="py-4">
+      <RecentlyWatchedRow
+        contentType={contentType}
+        onItemClick={onItemClick}
+        favorites={favorites}
+        onToggleFavorite={onToggleFavorite}
+        accentColor={accentColor}
+        client={client}
+      />
       {rows.map((row) => (
         <HorizontalRow
           key={row.category.category_id}
