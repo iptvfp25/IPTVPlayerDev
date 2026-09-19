@@ -17,6 +17,7 @@ import { XtreamClient, isElectron } from "@/lib/xtream";
 import { useFavorites, type FavoriteEntry } from "@/lib/favorites";
 import { loadSettings, saveSettings, ACCENT_COLORS, t, type AppSettings } from "@/lib/settings";
 import { debouncedPushSettings } from "@/lib/sync";
+import { recordWatched, getRecentlyWatched, subscribeRecentlyWatched } from "@/lib/recentlyWatched";
 import type { Session } from "@supabase/supabase-js";
 import type { Category, ContentType, EpisodeItem, UserInfo } from "@/types/xtream";
 import VideoPlayer from "@/components/VideoPlayer";
@@ -55,6 +56,15 @@ const liveCache: { categories: Category[] | null; allStreams: SidebarItem[] | nu
 // direction that matches where the destination tab sits in the menu.
 const TAB_ORDER: AppTab[] = ["live", "vod", "series", "search", "favorites", "downloads"];
 
+function mapRecentLiveToSidebarItems(): SidebarItem[] {
+  return getRecentlyWatched("live").map((e) => ({
+    id: e.id,
+    name: e.name,
+    categoryId: e.categoryId || "",
+    icon: e.icon,
+  }));
+}
+
 export default function MainScreen({ client, userInfo, session, onLogout }: MainScreenProps) {
   const [activeTab, setActiveTab] = useState<AppTab>("live");
   const [appSettings, setAppSettings] = useState<AppSettings>(() => loadSettings());
@@ -92,6 +102,11 @@ export default function MainScreen({ client, userInfo, session, onLogout }: Main
 
   const [allLiveStreams, setAllLiveStreams] = useState<SidebarItem[]>(liveCache.allStreams || []);
   const { favKeys, toggle: toggleFav, entries: favEntries } = useFavorites();
+  const [recentLive, setRecentLive] = useState<SidebarItem[]>(() => mapRecentLiveToSidebarItems());
+
+  useEffect(() => {
+    return subscribeRecentlyWatched(() => setRecentLive(mapRecentLiveToSidebarItems()));
+  }, []);
 
   const vodPausedRef = useRef(false);
   const livePausedRef = useRef(false);
@@ -228,6 +243,7 @@ export default function MainScreen({ client, userInfo, session, onLogout }: Main
     const streamId = Number(item.id);
     const url = client.getLiveUrl(streamId);
     setPlayback({ url, title: item.name, isLive: true, streamId });
+    recordWatched({ id: item.id, name: item.name, type: "live", categoryId: item.categoryId, icon: item.icon });
   };
 
   const playLive = (streamId: number, name: string) => {
@@ -237,17 +253,26 @@ export default function MainScreen({ client, userInfo, session, onLogout }: Main
     setPlayback({ url, title: name, isLive: true, streamId });
     setOverlayPlayback(null);
     setActiveTab("live");
+    recordWatched({ id: String(streamId), name, type: "live" });
   };
 
-  const playVod = (streamId: number, ext: string, name: string) => {
+  const playVod = (streamId: number, ext: string, name: string, poster?: string, rating?: string) => {
     stopLivePlayback();
     prioritizeVodPlayback();
     const url = client.getVodUrl(streamId, ext);
     setOverlayPlayback({ url, title: name, isLive: false });
+    recordWatched({
+      id: String(streamId),
+      name,
+      type: "vod",
+      containerExtension: ext,
+      poster,
+      rating,
+    });
   };
 
   const handleVodItemClick = (item: BrowseItem) => {
-    playVod(Number(item.id), item.containerExtension || "mp4", item.name);
+    playVod(Number(item.id), item.containerExtension || "mp4", item.name, item.poster, item.rating);
   };
 
   const handleSeriesItemClick = (item: BrowseItem) => {
@@ -270,6 +295,18 @@ export default function MainScreen({ client, userInfo, session, onLogout }: Main
     prioritizeVodPlayback();
     const url = client.getEpisodeUrl(episode.episode_id, episode.container_extension);
     setOverlayPlayback({ url, title: `${seriesName} - ${episode.title}`, isLive: false });
+    if (seriesDetail) {
+      recordWatched({
+        id: String(seriesDetail.seriesId),
+        name: seriesDetail.name,
+        type: "series",
+        seriesId: seriesDetail.seriesId,
+        poster: seriesDetail.poster,
+        rating: seriesDetail.rating,
+        plot: seriesDetail.plot,
+        genre: seriesDetail.genre,
+      });
+    }
   };
 
   const handleBackToCategories = () => {
@@ -281,6 +318,12 @@ export default function MainScreen({ client, userInfo, session, onLogout }: Main
 
   const handleShowFavorites = () => {
     setLevel("favorites");
+    setSelectedCategory(null);
+    setError("");
+  };
+
+  const handleShowRecentlyWatched = () => {
+    setLevel("recent");
     setSelectedCategory(null);
     setError("");
   };
@@ -305,7 +348,7 @@ export default function MainScreen({ client, userInfo, session, onLogout }: Main
     if (entry.type === "live") {
       playLive(Number(entry.id), entry.name);
     } else if (entry.type === "vod") {
-      playVod(Number(entry.id), entry.containerExtension || "mp4", entry.name);
+      playVod(Number(entry.id), entry.containerExtension || "mp4", entry.name, entry.poster, entry.rating);
     } else {
       setSeriesDetail({
         seriesId: entry.seriesId!,
@@ -403,6 +446,8 @@ export default function MainScreen({ client, userInfo, session, onLogout }: Main
               favorites={favKeys}
               onToggleFavorite={handleLiveFavToggle}
               onShowFavorites={handleShowFavorites}
+              recentlyWatched={recentLive}
+              onShowRecentlyWatched={handleShowRecentlyWatched}
             />
           </>
         );
