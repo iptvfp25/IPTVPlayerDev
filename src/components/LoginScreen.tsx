@@ -9,7 +9,12 @@ interface LoginScreenProps {
 }
 
 const STORAGE_KEY = "xtream-credentials";
-const PRELOAD_ITEMS_PER_TYPE = 40;
+// Movies/series lists can be huge -- cap the sample we preload posters for
+// so login doesn't have to wait on thousands of images. Live channels are
+// different: they're what Sidebar shows a logo for right away and the list
+// is usually much smaller, so every channel icon is preloaded, not just a
+// sample.
+const PRELOAD_ITEMS_PER_TYPE = 60;
 // Safety cap only -- normal completion happens as soon as every image has
 // actually loaded (or failed) and the warm-up stream has received its first
 // bytes. This just guarantees a handful of slow/broken items or an
@@ -157,8 +162,13 @@ export default function LoginScreen({ onLogin }: LoginScreenProps) {
             client.getSeries().catch(() => []),
           ]);
 
+          // Every live channel's logo gets preloaded -- not just a sample --
+          // since Sidebar shows that icon for each channel in the list the
+          // moment the user lands on the Live tab. Movies/series lists can
+          // run into the thousands, so those stay capped to a reasonable
+          // sample to keep login from stalling on a catalog-wide image dump.
           const imageUrls = [
-            ...liveStreams.slice(0, PRELOAD_ITEMS_PER_TYPE).map(extractImageUrl),
+            ...liveStreams.map(extractImageUrl),
             ...vodStreams.slice(0, PRELOAD_ITEMS_PER_TYPE).map(extractImageUrl),
             ...seriesList.slice(0, PRELOAD_ITEMS_PER_TYPE).map(extractImageUrl),
           ].filter((u): u is string => !!u);
